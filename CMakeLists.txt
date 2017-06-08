@@ -12,9 +12,11 @@ find_package(catkin REQUIRED COMPONENTS
   rospy
   std_msgs
   image_transport
+  message_filters
   cv_bridge
 )
 find_package(OpenCV REQUIRED)
+find_package(PCL REQUIRED)
 
 ## System dependencies are found with CMake's conventions
 # find_package(Boost REQUIRED COMPONENTS system)
@@ -122,6 +124,7 @@ catkin_package(
 include_directories(
   ${catkin_INCLUDE_DIRS}
   ${OpenCV_INCLUDE_DIRS}
+  ${PCL_INCLUDE_DIRS}
 )
 
 ## Declare a C++ library
@@ -203,4 +206,4 @@ include_directories(
 # catkin_add_nosetests(test)
 
 add_executable(sub src/test-subscriber.cpp)
-target_link_libraries(sub ${OpenCV_LIBRARIES} ${catkin_LIBRARIES})
+target_link_libraries(sub ${OpenCV_LIBRARIES} ${catkin_LIBRARIES} ${PCL_LIBRARIES})

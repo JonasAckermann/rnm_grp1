@@ -44,10 +44,15 @@
   <build_depend>rospy</build_depend>
   <build_depend>std_msgs</build_depend>
   <build_depend>image_transport</build_depend>
+  <build_depend>libpcl-all-dev</build_depend>
+  <build_depend>message_filters</build_depend>
   <build_depend>cv_bridge</build_depend><!-- Depend on cv_bridge instead of libopencv-dev to support ROS Hydro.-->
   <run_depend>roscpp</run_depend>
   <run_depend>rospy</run_depend>
   <run_depend>std_msgs</run_depend>
+  <run_depend>message_filters</run_depend>
+  <run_depend>libpcl-all-dev</run_depend>
+  <run_depend>libpcl-all</run_depend>
   <run_depend>cv_bridge</run_depend><!-- Depend on cv_bridge instead of libopencv-dev to support ROS Hydro.-->
   <run_depend>image_transport</run_depend>
 
