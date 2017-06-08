@@ -7,8 +7,12 @@
 #include <cv_bridge/cv_bridge.h>
 
 #include <pcl/point_cloud.h>
+#include <pcl/PCLPointCloud2.h>
+#include <pcl/PolygonMesh.h>
 #include <pcl/point_types.h>
+#include <pcl/conversions.h>
 #include <pcl/io/pcd_io.h>
+#include <pcl/io/vtk_lib_io.h>
 #include <pcl/visualization/cloud_viewer.h>
 
 #include <message_filters/subscriber.h>
@@ -25,19 +29,21 @@ typedef message_filters::sync_policies::ExactTime<sensor_msgs::Image, sensor_msg
 
 cv::Rect getRegionOfInterest(cv::Mat frame);
 void visualizeRegionOfInterest(cv::Mat frame, cv::Rect roi_b);
-void cloudViewer(cv::Mat color, cv::Mat depth, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud);
-void createCloud(const cv::Mat &depth, const cv::Mat &color, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr &cloud);
+void cloudViewer(cv::Mat color, cv::Mat depth, pcl::PointCloud<pcl::PointXYZ>::Ptr cloud);
+void createCloud(const cv::Mat &depth, const cv::Mat &color, pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud);
 
-string face_cascade_name = "/home/rnm_grp1/catkin_ws/src/rnmgroup1/data/cascades.xml";
+string headModelFileName = "/home/rnm_grp1/catkin_ws/src/rnmgrp1/data/head_model.stl";
+string face_cascade_name = "/home/rnm_grp1/catkin_ws/src/rnmgrp1/data/cascades.xml";
 string topicColor = "/kinect2/hd/image_color";
 string topicDepth = "/kinect2/hd/image_depth_rect";
 cv::CascadeClassifier face_cascade;
+pcl::PointCloud<pcl::PointXYZ>::Ptr headCloud(new pcl::PointCloud<pcl::PointXYZ>);
 string window_name = "Capture - Face detection";
 cv::Rect lastRoi;
 
 
 pcl::visualization::PCLVisualizer::Ptr cloudVisualizer(new pcl::visualization::PCLVisualizer("Cloud Viewer"));
-pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud;
+pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
 bool cloudInitialized = false;
 cv::Mat cameraMatrixColor;
 cv::Mat lookupX, lookupY;
@@ -114,7 +120,7 @@ void pclCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_msg
             color.convertTo(tmp, CV_8U, 0.02);
             cv::cvtColor(tmp, color, CV_GRAY2BGR);
         }
-        cloud = pcl::PointCloud<pcl::PointXYZRGBA>::Ptr(new pcl::PointCloud<pcl::PointXYZRGBA>());
+        cloud = pcl::PointCloud<pcl::PointXYZ>::Ptr(new pcl::PointCloud<pcl::PointXYZ>());
         cloud->height = color.rows;
         cloud->width = color.cols;
         cloud->is_dense = false;
@@ -124,7 +130,7 @@ void pclCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_msg
     cloudViewer(color, depth, cloud);
 }
 
-void cloudViewer(cv::Mat color, cv::Mat depth, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud)
+void cloudViewer(cv::Mat color, cv::Mat depth, pcl::PointCloud<pcl::PointXYZ>::Ptr cloud)
 {
     const std::string cloudName = "rendered";
     if (!cloudInitialized) {
@@ -148,14 +154,14 @@ void cloudViewer(cv::Mat color, cv::Mat depth, pcl::PointCloud<pcl::PointXYZRGBA
     }
 }
 
-void createCloud(const cv::Mat &depth, const cv::Mat &color, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr &cloud)
+void createCloud(const cv::Mat &depth, const cv::Mat &color, pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud)
 {
     const float badPoint = std::numeric_limits<float>::quiet_NaN();
 
     #pragma omp parallel for
     for(int r = 0; r < depth.rows; ++r)
     {
-        pcl::PointXYZRGBA *itP = &cloud->points[r * depth.cols];
+        pcl::PointXYZ *itP = &cloud->points[r * depth.cols];
         const uint16_t *itD = depth.ptr<uint16_t>(r);
         const cv::Vec3b *itC = color.ptr<cv::Vec3b>(r);
         const float y = lookupY.at<float>(0, r);
@@ -169,16 +175,16 @@ void createCloud(const cv::Mat &depth, const cv::Mat &color, pcl::PointCloud<pcl
             {
                 // not valid
                 itP->x = itP->y = itP->z = badPoint;
-                itP->rgba = 0;
+//                itP->rgba = 0;
                 continue;
             }
             itP->z = depthValue;
             itP->x = *itX * depthValue;
             itP->y = y * depthValue;
-            itP->b = itC->val[0];
-            itP->g = itC->val[1];
-            itP->r = itC->val[2];
-            itP->a = 255;
+//            itP->b = itC->val[0];
+//            itP->g = itC->val[1];
+//            itP->r = itC->val[2];
+//            itP->a = 255;
         }
     }
 }
@@ -191,6 +197,14 @@ int main(int argc, char **argv)
     {
         ROS_ERROR("Could not load cascade");
     }
+    pcl::PolygonMesh mesh;
+    if (pcl::io::loadPolygonFileSTL(headModelFileName, mesh) == 0)
+    {
+      ROS_ERROR("Failed to load STL file\n");
+    }
+    pcl::fromPCLPointCloud2(mesh.cloud, *headCloud);
+    pcl::visualization::PCLVisualizer::Ptr headVisualizer(new pcl::visualization::PCLVisualizer("Cloud Viewer"));
+    headVisualizer->addPointCloud(headCloud, "headCloud");
     ros::init(argc, argv, "image_listener");
     ros::NodeHandle nh;
     image_transport::ImageTransport it(nh);
