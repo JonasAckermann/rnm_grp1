@@ -6,9 +6,16 @@
 #include "opencv2/imgproc/imgproc.hpp"
 #include <cv_bridge/cv_bridge.h>
 
+#include <dlib/opencv.h>
+#include <dlib/image_processing/frontal_face_detector.h>
+#include <dlib/image_processing/render_face_detections.h>
+#include <dlib/image_processing.h>
+#include <dlib/gui_widgets.h>
+
 #include <pcl/point_cloud.h>
 #include <pcl/PCLPointCloud2.h>
 #include <pcl/PolygonMesh.h>
+#include <pcl/filters/crop_box.h>
 #include <pcl/point_types.h>
 #include <pcl/conversions.h>
 #include <pcl/io/pcd_io.h>
@@ -23,28 +30,49 @@
 #include <stdio.h>
 
 using namespace cv;
+using namespace dlib;
 using namespace std;
+
+#undef DISPLAY_LANDMARKS
+#undef DISPLAY_HEAD_MODEL
+#undef DISPLAY_FACES
+#define DISPLAY_CLOUD
+#undef COLORED_CLOUD
+
+#ifdef COLORED_CLOUD
+typedef pcl::PointXYZRGBA CloudPoint;
+#else
+typedef pcl::PointXYZ CloudPoint;
+#endif
 
 typedef message_filters::sync_policies::ExactTime<sensor_msgs::Image, sensor_msgs::Image, sensor_msgs::CameraInfo, sensor_msgs::CameraInfo> ExactSyncPolicy;
 
 cv::Rect getRegionOfInterest(cv::Mat frame);
 void visualizeRegionOfInterest(cv::Mat frame, cv::Rect roi_b);
-void cloudViewer(cv::Mat color, cv::Mat depth, pcl::PointCloud<pcl::PointXYZ>::Ptr cloud);
-void createCloud(const cv::Mat &depth, const cv::Mat &color, pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud);
+void cloudViewer(pcl::PointCloud<CloudPoint>::Ptr cloud, const cv::Rect roi);
+void createCloud(const cv::Mat &depth, const cv::Mat &color, pcl::PointCloud<CloudPoint>::Ptr &cloud, const cv::Rect roi);
+void pclCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_msgs::Image::ConstPtr imageDepth,
+                 const sensor_msgs::CameraInfo::ConstPtr cameraInfoColor, const sensor_msgs::CameraInfo::ConstPtr cameraInfoDepth, const cv::Rect roi);
 
 string headModelFileName = "/home/rnm_grp1/catkin_ws/src/rnmgrp1/data/head_model.stl";
 string face_cascade_name = "/home/rnm_grp1/catkin_ws/src/rnmgrp1/data/cascades.xml";
+string landmarksFileName = "/home/rnm_grp1/catkin_ws/src/rnmgrp1/data/shape_predictor_68_face_landmarks.dat";
 string topicColor = "/kinect2/hd/image_color";
 string topicDepth = "/kinect2/hd/image_depth_rect";
 cv::CascadeClassifier face_cascade;
-pcl::PointCloud<pcl::PointXYZ>::Ptr headCloud(new pcl::PointCloud<pcl::PointXYZ>);
+pcl::PointCloud<CloudPoint>::Ptr headCloud(new pcl::PointCloud<CloudPoint>);
 string window_name = "Capture - Face detection";
 cv::Rect lastRoi;
 
+frontal_face_detector detector = get_frontal_face_detector();
 
-pcl::visualization::PCLVisualizer::Ptr cloudVisualizer(new pcl::visualization::PCLVisualizer("Cloud Viewer"));
-pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
-bool cloudInitialized = false;
+#if defined(DISPLAY_LANDMARKS) || defined(DISPLAY_FACES)
+image_window win;
+#endif
+
+shape_predictor pose_model;
+
+pcl::PointCloud<CloudPoint>::Ptr cloud;
 cv::Mat cameraMatrixColor;
 cv::Mat lookupX, lookupY;
 void createLookup(size_t width, size_t height)
@@ -87,25 +115,68 @@ void readCameraInfo(const sensor_msgs::CameraInfo::ConstPtr cameraInfo, cv::Mat 
 }
 
 
-void imageCallback(const sensor_msgs::ImageConstPtr& msg)
+void imageCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_msgs::Image::ConstPtr imageDepth,
+                   const sensor_msgs::CameraInfo::ConstPtr cameraInfoColor, const sensor_msgs::CameraInfo::ConstPtr cameraInfoDepth)
 {
     try
     {
-        cv_bridge::CvImageConstPtr imagePtr = cv_bridge::toCvShare(msg, "bgr8");
+        cv_bridge::CvImageConstPtr imagePtr = cv_bridge::toCvShare(imageColor, "bgr8");
         cv::Mat image = imagePtr->image;
+        /*
         cv::Rect roi = getRegionOfInterest(image);
         lastRoi = roi;
         visualizeRegionOfInterest(image, roi);
+        */
+        // Turn OpenCV's Mat into something dlib can deal with.  Note that this just
+        // wraps the Mat object, it doesn't copy anything.  So cimg is only valid as
+        // long as temp is valid.  Also don't do anything to temp that would cause it
+        // to reallocate the memory which stores the image as that will make cimg
+        // contain dangling pointers.  This basically means you shouldn't modify temp
+        // while using cimg.
+        cv_image<bgr_pixel> cimg(image);
+
+        // Detect faces
+        std::vector<dlib::rectangle> faces = detector(cimg);
+        cv::Rect roi;
+        if (faces.size() >= 1) {
+            dlib::rectangle r = faces.front();
+            roi = cv::Rect(cv::Point2i(r.left(), r.top()), cv::Point2i(r.right() + 1, r.bottom() + 1));
+        } else {
+            roi.width = image.cols / 10;
+            roi.height = image.rows / 10;
+            roi.x = (image.cols - roi.width) / 2;
+            roi.y = (image.rows - roi.height) / 2;
+        }
+
+#ifdef DISPLAY_LANDMARKS
+        // Find the pose of each face.
+        std::vector<full_object_detection> shapes;
+        for (unsigned long i = 0; i < faces.size(); ++i)
+            shapes.push_back(pose_model(cimg, faces[i]));
+#endif
+        // Display it all on the screen
+#if defined(DISPLAY_FACES) || defined(DISPLAY_LANDMARKS)
+        win.clear_overlay();
+        win.set_image(cimg);
+  #ifdef DISPLAY_LANDMARKS
+        win.add_overlay(render_face_detections(shapes));
+  #endif
+  #ifdef DISPLAY_FACES
+        win.add_overlay(faces);
+  #endif
+#endif
+        pclCallback(imageColor, imageDepth, cameraInfoColor, cameraInfoDepth, roi);
     }
     catch (cv_bridge::Exception& e)
     {
-        ROS_ERROR("Could not convert from '%s' to 'bgr8'.", msg->encoding.c_str());
+        ROS_ERROR("Could not convert from '%s' to 'bgr8'.", imageColor->encoding.c_str());
     }
 }
 
 void pclCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_msgs::Image::ConstPtr imageDepth,
-                 const sensor_msgs::CameraInfo::ConstPtr cameraInfoColor, const sensor_msgs::CameraInfo::ConstPtr cameraInfoDepth)
+                 const sensor_msgs::CameraInfo::ConstPtr cameraInfoColor, const sensor_msgs::CameraInfo::ConstPtr cameraInfoDepth, const cv::Rect roi)
 {
+    static bool cloudInitialized = false;
     cv::Mat color, depth;
     readImage(imageColor, color);
     readImage(imageDepth, depth);
@@ -120,54 +191,57 @@ void pclCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_msg
             color.convertTo(tmp, CV_8U, 0.02);
             cv::cvtColor(tmp, color, CV_GRAY2BGR);
         }
-        cloud = pcl::PointCloud<pcl::PointXYZ>::Ptr(new pcl::PointCloud<pcl::PointXYZ>());
-        cloud->height = color.rows;
-        cloud->width = color.cols;
+        cloud = pcl::PointCloud<CloudPoint>::Ptr(new pcl::PointCloud<CloudPoint>());
         cloud->is_dense = false;
-        cloud->points.resize(cloud->height * cloud->width);
         createLookup(color.cols, color.rows);
+        cloudInitialized = true;
     }
-    cloudViewer(color, depth, cloud);
+    cloud->height = roi.height;
+    cloud->width = roi.width;
+    cloud->points.resize(cloud->height * cloud->width);
+    createCloud(depth, color, cloud, roi);
+#ifdef DISPLAY_CLOUD
+    cloudViewer(cloud, roi);
+#endif
 }
 
-void cloudViewer(cv::Mat color, cv::Mat depth, pcl::PointCloud<pcl::PointXYZ>::Ptr cloud)
+void cloudViewer(pcl::PointCloud<CloudPoint>::Ptr cloud, const cv::Rect roi)
 {
-    const std::string cloudName = "rendered";
-    if (!cloudInitialized) {
-        createCloud(depth, color, cloud);
+    static bool viewerInitialized = false;
+    static pcl::visualization::PCLVisualizer::Ptr cloudVisualizer(new pcl::visualization::PCLVisualizer("Cloud Viewer"));
+    static std::string cloudName = "rendered";
 
+    if (!viewerInitialized) {
         cloudVisualizer->addPointCloud(cloud, cloudName);
         cloudVisualizer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 1, cloudName);
         cloudVisualizer->initCameraParameters();
         cloudVisualizer->setBackgroundColor(0, 0, 0);
-        cloudVisualizer->setPosition(false ? color.cols : 0, 0);
-        cloudVisualizer->setSize(color.cols, color.rows);
+        cloudVisualizer->setPosition(0, 0);
+        cloudVisualizer->setSize(roi.width, roi.height);
         cloudVisualizer->setShowFPS(true);
         cloudVisualizer->setCameraPosition(0, 0, 0, 0, -1, 0);
-
-        cloudVisualizer->spinOnce(10);
-        cloudInitialized = true;
+        viewerInitialized = true;
     } else {
-        createCloud(depth, color, cloud);
+        cloudVisualizer->setSize(roi.width, roi.height);
         cloudVisualizer->updatePointCloud(cloud, cloudName);
-        cloudVisualizer->spinOnce(10);
     }
+    cloudVisualizer->spinOnce(10);
 }
 
-void createCloud(const cv::Mat &depth, const cv::Mat &color, pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud)
+void createCloud(const cv::Mat &depth, const cv::Mat &color, pcl::PointCloud<CloudPoint>::Ptr &cloud, const cv::Rect roi)
 {
     const float badPoint = std::numeric_limits<float>::quiet_NaN();
 
     #pragma omp parallel for
-    for(int r = 0; r < depth.rows; ++r)
+    for(int r = roi.y; r < roi.y + roi.height; ++r)
     {
-        pcl::PointXYZ *itP = &cloud->points[r * depth.cols];
-        const uint16_t *itD = depth.ptr<uint16_t>(r);
-        const cv::Vec3b *itC = color.ptr<cv::Vec3b>(r);
+        CloudPoint *itP = &cloud->points[(r - roi.y) * roi.width];
+        const uint16_t *itD = depth.ptr<uint16_t>(r) + roi.x;
+        const cv::Vec3b *itC = color.ptr<cv::Vec3b>(r)  + roi.x;
         const float y = lookupY.at<float>(0, r);
-        const float *itX = lookupX.ptr<float>();
+        const float *itX = lookupX.ptr<float>() + roi.x;
 
-        for(size_t c = 0; c < (size_t)depth.cols; ++c, ++itP, ++itD, ++itC, ++itX)
+        for(size_t c = roi.x; c < (size_t)(roi.x + roi.width); ++c, ++itP, ++itD, ++itC, ++itX)
         {
             register const float depthValue = *itD / 1000.0f;
             // Check for invalid measurements
@@ -175,16 +249,20 @@ void createCloud(const cv::Mat &depth, const cv::Mat &color, pcl::PointCloud<pcl
             {
                 // not valid
                 itP->x = itP->y = itP->z = badPoint;
-//                itP->rgba = 0;
+#ifdef COLORED_CLOUD
+                itP->rgba = 0;
+#endif
                 continue;
             }
             itP->z = depthValue;
             itP->x = *itX * depthValue;
             itP->y = y * depthValue;
-//            itP->b = itC->val[0];
-//            itP->g = itC->val[1];
-//            itP->r = itC->val[2];
-//            itP->a = 255;
+#ifdef COLORED_CLOUD
+            itP->b = itC->val[0];
+            itP->g = itC->val[1];
+            itP->r = itC->val[2];
+            itP->a = 255;
+#endif
         }
     }
 }
@@ -193,18 +271,30 @@ void createCloud(const cv::Mat &depth, const cv::Mat &color, pcl::PointCloud<pcl
 
 int main(int argc, char **argv)
 {
-    if (!face_cascade.load(face_cascade_name))
-    {
-        ROS_ERROR("Could not load cascade");
-    }
+    // load pointCloud file of head model
     pcl::PolygonMesh mesh;
     if (pcl::io::loadPolygonFileSTL(headModelFileName, mesh) == 0)
     {
       ROS_ERROR("Failed to load STL file\n");
     }
+    // load landmarks file
+    try {
+        deserialize(landmarksFileName) >> pose_model;
+    }
+    catch(serialization_error& e)
+    {
+        ROS_ERROR("You need dlib's default face landmarking model file to run this example.");
+        cout << "You can get it from the following URL: " << endl;
+        cout << "   http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2" << endl;
+        cout << endl << e.what() << endl;
+    }
+    // create pointCloud of head model
     pcl::fromPCLPointCloud2(mesh.cloud, *headCloud);
+#ifdef DISPLAY_HEAD_MODEL
     pcl::visualization::PCLVisualizer::Ptr headVisualizer(new pcl::visualization::PCLVisualizer("Cloud Viewer"));
     headVisualizer->addPointCloud(headCloud, "headCloud");
+#endif
+    // initialize ros node
     ros::init(argc, argv, "image_listener");
     ros::NodeHandle nh;
     image_transport::ImageTransport it(nh);
@@ -222,82 +312,13 @@ int main(int argc, char **argv)
     message_filters::Subscriber<sensor_msgs::CameraInfo> * subCameraInfoDepth = new message_filters::Subscriber<sensor_msgs::CameraInfo>(nh, topicCameraInfoDepth, 1);
 
     message_filters::Synchronizer<ExactSyncPolicy> * syncExact = new message_filters::Synchronizer<ExactSyncPolicy>(ExactSyncPolicy(1), *subImageColor, *subImageDepth, *subCameraInfoColor, *subCameraInfoDepth);
-    syncExact->registerCallback(pclCallback);
-
+    syncExact->registerCallback(imageCallback);
 
     ros::spin();
-    cv::destroyWindow("view");
 }
 
-// Function detectAndDisplay
-cv::Rect getRegionOfInterest(cv::Mat frame)
-{
-    std::vector<Rect> faces;
-    Mat frame_gray;
-
-    cvtColor(frame, frame_gray, COLOR_BGR2GRAY);
-    equalizeHist(frame_gray, frame_gray);
-
-    // Detect faces
-    face_cascade.detectMultiScale(frame_gray, faces, 1.1, 2, 0 | CASCADE_SCALE_IMAGE, Size(30, 30));
-
-    // Set Region of Interest
-    cv::Rect roi_b;
-    cv::Rect roi_c;
-
-    size_t ic = 0; // ic is index of current element
-    int ac = 0; // ac is area of current element
-
-    size_t ib = 0; // ib is index of biggest element
-    int ab = 0; // ab is area of biggest element
-
-    for (ic = 0; ic < faces.size(); ic++) // Iterate through all current elements (detected faces)
-    {
-        roi_c.x = faces[ic].x;
-        roi_c.y = faces[ic].y;
-        roi_c.width = (faces[ic].width);
-        roi_c.height = (faces[ic].height);
-
-        ac = roi_c.width * roi_c.height; // Get the area of current element (detected face)
-
-        roi_b.x = faces[ib].x;
-        roi_b.y = faces[ib].y;
-        roi_b.width = (faces[ib].width);
-        roi_b.height = (faces[ib].height);
-
-        ab = roi_b.width * roi_b.height; // Get the area of biggest element, at beginning it is same as "current" element
-
-        if (ac > ab)
-        {
-            ib = ic;
-            roi_b.x = faces[ib].x;
-            roi_b.y = faces[ib].y;
-            roi_b.width = (faces[ib].width);
-            roi_b.height = (faces[ib].height);
-        }
-    }
-    if (faces.size() == 0) {
-        roi_b.width = frame.cols / 10;
-        roi_b.height = frame.rows / 10;
-        roi_b.x = (frame.cols - roi_b.width) / 2;
-        roi_b.y = (frame.rows - roi_b.height) / 2;
-    }
-
-    return roi_b;
-}
-
-void visualizeRegionOfInterest(cv::Mat frame, cv::Rect roi_b) {
-    string text;
-    stringstream sstm;
-
-    // Show image
-    sstm << "Crop area size: " << roi_b.width << "x" << roi_b.height;
-    text = sstm.str();
-
-    putText(frame, text, cvPoint(30, 30), FONT_HERSHEY_COMPLEX_SMALL, 0.8, cvScalar(0, 0, 255), 1, CV_AA);
-
-    Point pt1(roi_b.x, roi_b.y); // Display roi on frame
-    Point pt2((roi_b.x + roi_b.height), (roi_b.y + roi_b.width));
-    rectangle(frame, pt1, pt2, Scalar(0, 255, 0), 2, 8, 0);
-    cv::imshow("view", frame);
-}
+#undef DISPLAY_LANDMARKS
+#undef DISPLAY_HEAD_MODEL
+#undef DISPLAY_FACES
+#undef DISPLAY_CLOUD
+#undef COLORED_CLOUD

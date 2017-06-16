@@ -127,6 +127,8 @@ include_directories(
   ${PCL_INCLUDE_DIRS}
 )
 
+include(../../../dlib-19.4/dlib/cmake)
+
 ## Declare a C++ library
 # add_library(${PROJECT_NAME}
 #   src/${PROJECT_NAME}/rnmgroup1.cpp
@@ -206,4 +208,4 @@ include_directories(
 # catkin_add_nosetests(test)
 
 add_executable(sub src/test-subscriber.cpp)
-target_link_libraries(sub ${OpenCV_LIBRARIES} ${catkin_LIBRARIES} ${PCL_LIBRARIES})
+target_link_libraries(sub ${OpenCV_LIBRARIES} ${catkin_LIBRARIES} ${PCL_LIBRARIES} dlib::dlib)
