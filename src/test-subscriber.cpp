@@ -17,6 +17,8 @@
 #include <pcl/PolygonMesh.h>
 #include <pcl/filters/crop_box.h>
 #include <pcl/filters/filter.h>
+#include <pcl/filters/radius_outlier_removal.h>
+#include <pcl/filters/passthrough.h>
 #include <pcl/point_types.h>
 #include <pcl/conversions.h>
 #include <pcl/io/pcd_io.h>
@@ -26,6 +28,7 @@
 #include <pcl/registration/registration.h>
 #include <pcl/registration/transformation_estimation_svd.h>
 #include <pcl/common/transforms.h>
+#include <pcl/common/centroid.h>
 
 #include <Eigen/Geometry>
 
@@ -44,6 +47,7 @@ using namespace std;
 #undef DISPLAY_HEAD_MODEL
 #define DISPLAY_FACES
 #define DISPLAY_CLOUD
+#undef USE_ICP
 #undef COLORED_CLOUD
 
 #ifdef COLORED_CLOUD
@@ -92,7 +96,7 @@ int dlibKeyPointIndices[numKeyPoints] = {
     8   // chin
 };
 // keyPoints in the head model
-Eigen::Matrix<double, 3, numKeyPoints> modelKeyPoints;
+Eigen::Matrix<double, 3, Eigen::Dynamic> modelKeyPoints(3, numKeyPoints);
 
 #if defined(DISPLAY_LANDMARKS) || defined(DISPLAY_FACES)
 image_window win;
@@ -145,6 +149,9 @@ void readCameraInfo(const sensor_msgs::CameraInfo::ConstPtr cameraInfo, cv::Mat 
 std::pair<bool, dlib::rectangle> getFaceBoundingBox(cv_image<bgr_pixel> image) {
   static frontal_face_detector detector = get_frontal_face_detector();
 
+  // IDEAS: Rotate image along z-axis according to last transform to improve face detection and landmark detection
+  // TODO - apply face detecion and landmark detection only on scaled clipping on current image based on last roi (scaling based on z-location of face?)
+  // TODO - handle false detections, loss of head; detect due to landmarks or face not found -> start detection based on whole image
   // detect faces
   std::vector<dlib::rectangle> faces = detector(image);
   if (faces.size() > 0) {
@@ -178,14 +185,24 @@ void imageCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_m
             // Find the pose of face
             const dlib::rectangle face = getFaceResult.second;
             // bounds of dlib rectangle are right, bottom exclusive
-            roi = cv::Rect(cv::Point2i(face.left(), face.top()), cv::Point2i(face.right() + 1, face.bottom() + 1));
+            int minX = face.left(), minY = face.top(), maxX = face.right() + 1, maxY = face.bottom() + 1;
 
             full_object_detection shape = pose_model(cimg, face);
             for(int i = 0; i < numKeyPoints; i++) {
               int partIdx = dlibKeyPointIndices[i];
-              keyPoints.push_back(shape.part(partIdx));
+              dlib::point keyPoint = shape.part(partIdx);
+              // TODO - compare points with OBJECT_PART_NOT_PRESENT
+              keyPoints.push_back(keyPoint);
+              // adjust bounds of roi
+              //*
+              if (keyPoint.x() > maxX) maxX = keyPoint.x();
+              else if (keyPoint.x() < minX) minX = keyPoint.x();
+              if (keyPoint.y() > maxY) maxY = keyPoint.y();
+              else if (keyPoint.y() < minY) minY = keyPoint.y();
+              //*/
             }
-            // TODO - get roi as bounding box of all keyPoints and rect of face
+            // let roi contain face and all detected keyPoints
+            roi = cv::Rect(cv::Point2i(minX, minY), cv::Point2i(maxX, maxY));
 #if defined(DISPLAY_FACES) || defined(DISPLAY_LANDMARKS)
             win.clear_overlay();
             win.set_image(cimg);
@@ -217,10 +234,10 @@ void imageCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_m
     }
 }
 
-Eigen::Matrix<double, 3, numKeyPoints> mapKeyPointsTo3D(std::vector<dlib::point> keyPoints, cv::Mat depth)
+Eigen::Matrix<double, 3, Eigen::Dynamic> mapKeyPointsTo3D(std::vector<dlib::point> keyPoints, cv::Mat depth)
 {
   const float badPoint = std::numeric_limits<float>::quiet_NaN();
-  Eigen::Matrix<double, 3, numKeyPoints> mapped;
+  Eigen::Matrix<double, 3, Eigen::Dynamic> mapped(3, numKeyPoints);
   for (int idx = 0; idx < numKeyPoints; idx++) {
     dlib::point p = keyPoints.at(idx);
     const float y = lookupY.at<float>(0, p.y());
@@ -239,14 +256,26 @@ Eigen::Matrix<double, 3, numKeyPoints> mapKeyPointsTo3D(std::vector<dlib::point>
 
 Eigen::Matrix<double, 4, 4> getInitialHeadTransformation(std::vector<dlib::point> keyPoints, cv::Mat depth)
 {
-  // map keyPoints to 3D space
-  Eigen::Matrix<double, 3, numKeyPoints> cloudKeyPoints = mapKeyPointsTo3D(keyPoints, depth);
+  // map keyPoints to 3D space ignoring NaN
+  Eigen::Matrix<double, 3, Eigen::Dynamic> cloudKeyPoints = mapKeyPointsTo3D(keyPoints, depth);
+  std::vector<int> validColIndices;
+  for (int idx = 0; idx < numKeyPoints; idx++) {
+    if (!std::isnan(cloudKeyPoints(0, idx))) {
+      validColIndices.push_back(idx);
+    }
+  }
+  Eigen::Matrix<double, 3, Eigen::Dynamic> validCloudKeyPoints(3, validColIndices.size());
+  Eigen::Matrix<double, 3, Eigen::Dynamic> validModelKeyPoints(3, validColIndices.size());
+  for (int idx = 0; idx < validColIndices.size(); idx++) {
+    validCloudKeyPoints.col(idx) = cloudKeyPoints.col(validColIndices.at(idx));
+    validModelKeyPoints.col(idx) = modelKeyPoints.col(validColIndices.at(idx));
+  }
+
   // get transform using umeyama method including scale
-  Eigen::Matrix<double, 4, 4> transform = Eigen::umeyama(modelKeyPoints, cloudKeyPoints, true);
+  Eigen::Matrix<double, 4, 4> transform = Eigen::umeyama(validModelKeyPoints, validCloudKeyPoints, true);
+  ROS_INFO("umeyama successfull");
+  std::cout << "transform" << std::endl << transform << std::endl << std::flush;
   return transform;
-  // TODO - convert eigen matrix to TransformEstimationSVD or another estimation usable by icp
-  //pcl::registration::TransformationEstimationSVD<CloudPoint, CloudPoint>::Ptr trans_svd (new pcl::registration::TransformationEstimationSVD<CloudPoint, CloudPoint>);
-  //return trans_svd;
 }
 
 void pclCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_msgs::Image::ConstPtr imageDepth, const sensor_msgs::CameraInfo::ConstPtr cameraInfoColor,
@@ -279,49 +308,59 @@ void pclCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_msg
     cloud->width = roi.width;
     cloud->points.resize(cloud->height * cloud->width);
     createCloud(depth, color, cloud, roi);
+
+    // find average z axis value
+    Eigen::Vector4f centroid;
+    pcl::compute3DCentroid(*cloud, centroid);
+    std::cout << centroid << std::endl;
+    pcl::PointCloud<CloudPoint>::Ptr filteredCloud(new pcl::PointCloud<CloudPoint>());
+    pcl::PassThrough<CloudPoint> pass;
+    pass.setInputCloud(cloud);
+    pass.setFilterFieldName("z");
+    pass.setFilterLimits(0.0, centroid(2, 0) + 20);
+    pass.filter(*filteredCloud);
+
     if (detected) {
-        Eigen::Matrix<double, 3, numKeyPoints> cloudKeyPoints = mapKeyPointsTo3D(keyPoints, depth);
+        /*
+        Eigen::Matrix<double, 4, 4> estimTrans = getInitialHeadTransformation(keyPoints, depth);
+        Eigen::Matrix<double, 3, Eigen::Dynamic> cloudKeyPoints = mapKeyPointsTo3D(keyPoints, depth);
+        pcl::PointCloud<CloudPoint>::Ptr modelKeyPointsCloud(new pcl::PointCloud<CloudPoint>());
+        for (int idx = 0; idx < numKeyPoints; idx++) {
+          Eigen::Vector3d col = modelKeyPoints.col(idx);
+          modelKeyPointsCloud->push_back(pcl::PointXYZ((float)col(0,0), (float)col(1,0), (float)col(2,0)));
+        }
+        pcl::transformPointCloud(*modelKeyPointsCloud, *modelKeyPointsCloud, estimTrans);
         pcl::PointCloud<CloudPoint>::Ptr keyPointsCloud(new pcl::PointCloud<CloudPoint>());
         for (int idx = 0; idx < numKeyPoints; idx++) {
-          dlib::point kp = keyPoints.at(idx);
-          if (kp.y() >= roi.y && kp.y() <= roi.y + roi.height && kp.x() >= roi.x && kp.x() <= roi.x + roi.width) {
-            CloudPoint cp = cloud->points[(kp.y() - roi.y) * roi.width + kp.x()];
-            Eigen::Vector3d col = cloudKeyPoints.col(idx);
-            std::cout << "keyPoint " << dlibKeyPointIndices[idx] << ", cp: " << cp << ", mapped" << col << std::endl;
-            keyPointsCloud->push_back(cp);
-          } else {
-            ROS_INFO("keyPoint %d outside region of interest", dlibKeyPointIndices[idx]);
-          }
-          //Eigen::Vector3d col = cloudKeyPoints.col(idx);
-          // !! TODO - conversion does not work
-          //keyPointsCloud->push_back(pcl::PointXYZ((float)col(0,0), (float)col(1,0), (float)col(2,0)));
+          Eigen::Vector3d col = cloudKeyPoints.col(idx);
+          keyPointsCloud->push_back(pcl::PointXYZ((float)col(0,0), (float)col(1,0), (float)col(2,0)));
         }
-        cloudViewer(cloud, keyPointsCloud, cv::Rect(cv::Point2i(0, 0), cv::Point2i(color.cols, color.rows)));
-        /*
+        cloudViewer(keyPointsCloud, modelKeyPointsCloud, cv::Rect(cv::Point2i(0, 0), cv::Point2i(color.cols, color.rows)));
+        //*/
+        //*
         std::vector<int> index;
         pcl::PointCloud<CloudPoint>::Ptr rmNan(new pcl::PointCloud<CloudPoint>());
-        pcl::removeNaNFromPointCloud(*cloud, *rmNan, index);
+        pcl::removeNaNFromPointCloud(*filteredCloud, *rmNan, index);
         Eigen::Matrix<double, 4, 4> estimTrans = getInitialHeadTransformation(keyPoints, depth);
-        pcl::transformPointCloud(*headCloud, *headCloud, estimTrans);
+        pcl::PointCloud<CloudPoint>::Ptr transformedHead(new pcl::PointCloud<CloudPoint>());
+        pcl::transformPointCloud(*headCloud, *transformedHead, estimTrans);
+#ifdef USE_ICP
         pcl::IterativeClosestPoint<CloudPoint, CloudPoint> icp;
-        //icp.setMaximumIterations(500);
-        //icp.setTransformationEpsilon(1e-8);
-        //icp.setEuclideanFitnessEpsilon(1);
-        icp.setInputSource(headCloud);
+        icp.setInputSource(transformedHead);
         icp.setInputTarget(rmNan);
-        // icp.setMaxCorrespondenceDistance(0.5f);
         pcl::PointCloud<CloudPoint>::Ptr Final(new pcl::PointCloud<CloudPoint>());
         icp.align(*Final);
         std::cout << "has converged:" << icp.hasConverged() << " score: " << icp.getFitnessScore() << std::endl;
         std::cout << icp.getFinalTransformation() << std::endl << std::flush;
-        //pcl::PointCloud<pcl::PointXYZ>::Ptr transformedHead(new pcl::PointCloud<CloudPoint>());
-        //pcl::transformPointCloud(headCloud, *transformedHead, icp.getFinalTransformation());
-        //pcl::PointCloud<CloudPoint> combined;
-        //pcl::concatenateFields (Final, *cloud, combined);
-#ifdef DISPLAY_CLOUD
-        cloudViewer(rmNan, headCloud, cv::Rect(cv::Point2i(0, 0), cv::Point2i(color.cols, color.rows)));
 #endif
-        */
+#ifdef DISPLAY_CLOUD
+  #ifdef USE_ICP
+        cloudViewer(rmNan, Final, cv::Rect(cv::Point2i(0, 0), cv::Point2i(color.cols, color.rows)));
+  #else
+        cloudViewer(rmNan, transformedHead, cv::Rect(cv::Point2i(0, 0), cv::Point2i(color.cols, color.rows)));
+  #endif
+#endif
+        //*/
     }
 }
 
@@ -338,7 +377,7 @@ void cloudViewer(pcl::PointCloud<CloudPoint>::Ptr cloud, pcl::PointCloud<CloudPo
         if (cloud2 != NULL) {
             pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> green(cloud2, 0, 255, 0);
             cloudVisualizer->addPointCloud(cloud2, green, "cloud2");
-            cloudVisualizer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 20, "cloud2");
+            cloudVisualizer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 1, "cloud2");
         }
         cloudVisualizer->initCameraParameters();
         cloudVisualizer->setBackgroundColor(0, 0, 0);
@@ -427,15 +466,11 @@ int main(int argc, char **argv)
     }
     // create pointCloud of head model, only required for stl import
     // pcl::fromPCLPointCloud2(mesh.cloud, *headCloud);
-    std::cout << "width: " << headCloud->width << ", height: " << headCloud->height << std::endl;
-    if (headCloud->is_dense) {
-        std::cout << "is dense" << std::endl;
-    }
-    if (headCloud->isOrganized()) {
-        std::cout << "is organized" << std::endl;
-    } else {
-        std::cout << "not organized" << std::endl;
-    }
+    pcl::RadiusOutlierRemoval<CloudPoint> outrem;
+    outrem.setInputCloud(headCloud);
+    outrem.setRadiusSearch(10);
+    outrem.setMinNeighborsInRadius(10);
+    outrem.filter(*headCloud);
     std::cout << std::flush;
     // init model keyPoints
     modelKeyPoints.col(0) = Eigen::Vector3d(204.4, -290.0, 2236.0); // center of left ear
