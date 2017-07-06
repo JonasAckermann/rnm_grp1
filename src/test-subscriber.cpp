@@ -36,6 +36,10 @@
 #include <message_filters/synchronizer.h>
 #include <message_filters/sync_policies/exact_time.h>
 
+#include "std_msgs/MultiArrayLayout.h"
+#include "std_msgs/MultiArrayDimension.h"
+#include "std_msgs/Float64MultiArray.h"
+
 #include <iostream>
 #include <stdio.h>
 
@@ -47,7 +51,7 @@ using namespace std;
 #undef DISPLAY_HEAD_MODEL
 #define DISPLAY_FACES
 #define DISPLAY_CLOUD
-#undef USE_ICP
+#define USE_ICP
 #undef COLORED_CLOUD
 
 #ifdef COLORED_CLOUD
@@ -65,10 +69,14 @@ void createCloud(const cv::Mat &depth, const cv::Mat &color, pcl::PointCloud<Clo
 void pclCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_msgs::Image::ConstPtr imageDepth, const sensor_msgs::CameraInfo::ConstPtr cameraInfoColor,
                  const sensor_msgs::CameraInfo::ConstPtr cameraInfoDepth, const cv::Rect roi, std::vector<dlib::point> keyPoints, bool detected);
 
-// string headModelFileName = "/home/rnm_grp1/catkin_ws/src/rnmgrp1/data/head_model.stl";
-string headModelFileName = "/home/rnm_grp1/catkin_ws/src/rnmgrp1/data/resampled_pc.pcd";
-string face_cascade_name = "/home/rnm_grp1/catkin_ws/src/rnmgrp1/data/cascades.xml";
-string landmarksFileName = "/home/rnm_grp1/catkin_ws/src/rnmgrp1/data/shape_predictor_68_face_landmarks.dat";
+// publisher for head pose transformation
+ros::Publisher transformPub;
+
+string projectName = "head_pose";
+// string headModelFileName = "/home/rnm_grp1/catkin_ws/src/" + projectName + "/data/head_model.stl";
+string headModelFileName = "/home/rnm_grp1/catkin_ws/src/" + projectName + "/data/resampled_pc.pcd";
+string face_cascade_name = "/home/rnm_grp1/catkin_ws/src/" + projectName + "/data/cascades.xml";
+string landmarksFileName = "/home/rnm_grp1/catkin_ws/src/" + projectName + "/data/shape_predictor_68_face_landmarks.dat";
 string topicColor = "/kinect2/qhd/image_color_rect";
 string topicDepth = "/kinect2/qhd/image_depth_rect";
 cv::CascadeClassifier face_cascade;
@@ -273,7 +281,6 @@ Eigen::Matrix<double, 4, 4> getInitialHeadTransformation(std::vector<dlib::point
 
   // get transform using umeyama method including scale
   Eigen::Matrix<double, 4, 4> transform = Eigen::umeyama(validModelKeyPoints, validCloudKeyPoints, true);
-  ROS_INFO("umeyama successfull");
   std::cout << "transform" << std::endl << transform << std::endl << std::flush;
   return transform;
 }
@@ -309,18 +316,16 @@ void pclCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_msg
     cloud->points.resize(cloud->height * cloud->width);
     createCloud(depth, color, cloud, roi);
 
-    // find average z axis value
-    Eigen::Vector4f centroid;
-    pcl::compute3DCentroid(*cloud, centroid);
-    std::cout << centroid << std::endl;
-    pcl::PointCloud<CloudPoint>::Ptr filteredCloud(new pcl::PointCloud<CloudPoint>());
-    pcl::PassThrough<CloudPoint> pass;
-    pass.setInputCloud(cloud);
-    pass.setFilterFieldName("z");
-    pass.setFilterLimits(0.0, centroid(2, 0) + 20);
-    pass.filter(*filteredCloud);
-
     if (detected) {
+        // filter cloud based on z value compared to centroid
+        Eigen::Vector4f centroid;
+        pcl::compute3DCentroid(*cloud, centroid);
+        pcl::PointCloud<CloudPoint>::Ptr filteredCloud(new pcl::PointCloud<CloudPoint>());
+        pcl::PassThrough<CloudPoint> pass;
+        pass.setInputCloud(cloud);
+        pass.setFilterFieldName("z");
+        pass.setFilterLimits(0.0, centroid(2, 0) + 20);
+        pass.filter(*filteredCloud);
         /*
         Eigen::Matrix<double, 4, 4> estimTrans = getInitialHeadTransformation(keyPoints, depth);
         Eigen::Matrix<double, 3, Eigen::Dynamic> cloudKeyPoints = mapKeyPointsTo3D(keyPoints, depth);
@@ -337,17 +342,19 @@ void pclCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_msg
         }
         cloudViewer(keyPointsCloud, modelKeyPointsCloud, cv::Rect(cv::Point2i(0, 0), cv::Point2i(color.cols, color.rows)));
         //*/
-        //*
         std::vector<int> index;
         pcl::PointCloud<CloudPoint>::Ptr rmNan(new pcl::PointCloud<CloudPoint>());
         pcl::removeNaNFromPointCloud(*filteredCloud, *rmNan, index);
         Eigen::Matrix<double, 4, 4> estimTrans = getInitialHeadTransformation(keyPoints, depth);
         pcl::PointCloud<CloudPoint>::Ptr transformedHead(new pcl::PointCloud<CloudPoint>());
         pcl::transformPointCloud(*headCloud, *transformedHead, estimTrans);
+        Eigen::Matrix4d transformation;
 #ifdef USE_ICP
         pcl::IterativeClosestPoint<CloudPoint, CloudPoint> icp;
         icp.setInputSource(transformedHead);
         icp.setInputTarget(rmNan);
+        icp.setMaxCorrespondenceDistance(9); // 9 mm
+        icp.setRANSACOutlierRejectionThreshold(9);
         pcl::PointCloud<CloudPoint>::Ptr Final(new pcl::PointCloud<CloudPoint>());
         icp.align(*Final);
         std::cout << "has converged:" << icp.hasConverged() << " score: " << icp.getFitnessScore() << std::endl;
@@ -356,11 +363,18 @@ void pclCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_msg
 #ifdef DISPLAY_CLOUD
   #ifdef USE_ICP
         cloudViewer(rmNan, Final, cv::Rect(cv::Point2i(0, 0), cv::Point2i(color.cols, color.rows)));
+        transformation.noalias() = estimTrans * icp.getFinalTransformation().cast<double>();
   #else
         cloudViewer(rmNan, transformedHead, cv::Rect(cv::Point2i(0, 0), cv::Point2i(color.cols, color.rows)));
+        transformation = estimTrans;
   #endif
 #endif
-        //*/
+        std_msgs::Float64MultiArray msg;
+        msg.data.clear();
+        for (int idx = 0; idx < transformation.size(); idx++) {
+          msg.data.push_back(*(transformation.data() + idx));
+        }
+        transformPub.publish(msg);
     }
 }
 
@@ -490,7 +504,7 @@ int main(int argc, char **argv)
     headVisualizer->addPointCloud(headCloud, "headCloud");
 #endif
     // initialize ros node
-    ros::init(argc, argv, "image_listener");
+    ros::init(argc, argv, "pose_estimator");
     ros::NodeHandle nh;
     image_transport::ImageTransport it(nh);
 
@@ -507,11 +521,15 @@ int main(int argc, char **argv)
     message_filters::Subscriber<sensor_msgs::CameraInfo> * subCameraInfoDepth = new message_filters::Subscriber<sensor_msgs::CameraInfo>(nh, topicCameraInfoDepth, 1);
 
     message_filters::Synchronizer<ExactSyncPolicy> * syncExact = new message_filters::Synchronizer<ExactSyncPolicy>(ExactSyncPolicy(1), *subImageColor, *subImageDepth, *subCameraInfoColor, *subCameraInfoDepth);
+
+    transformPub = nh.advertise<std_msgs::Float64MultiArray>("/headPose/transform", 100);
+
+    // setup callback
     syncExact->registerCallback(imageCallback);
 
     /*
     pcl::PointCloud<CloudPoint>::Ptr ownCloud(new pcl::PointCloud<CloudPoint>);
-    if (pcl::io::loadPCDFile<CloudPoint>("/home/rnm_grp1/catkin_ws/src/rnmgrp1/data/translated_pc.pcd", *ownCloud) == -1)
+    if (pcl::io::loadPCDFile<CloudPoint>("/home/rnm_grp1/catkin_ws/src/" + projectName + "/data/translated_pc.pcd", *ownCloud) == -1)
     {
       ROS_ERROR("Failed to load PCD ownCloud file\n");
     }
