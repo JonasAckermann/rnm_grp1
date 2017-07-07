@@ -125,6 +125,7 @@ include_directories(
   ${catkin_INCLUDE_DIRS}
   ${OpenCV_INCLUDE_DIRS}
   ${PCL_INCLUDE_DIRS}
+  src
 )
 
 include(../../../dlib-19.4/dlib/cmake)
@@ -207,5 +208,5 @@ include(../../../dlib-19.4/dlib/cmake)
 ## Add folders to be run by python nosetests
 # catkin_add_nosetests(test)
 
-add_executable(sub src/test-subscriber.cpp)
+add_executable(sub src/test-subscriber.cpp src/facedetector.cpp src/headposeestimator.cpp)
 target_link_libraries(sub ${OpenCV_LIBRARIES} ${catkin_LIBRARIES} ${PCL_LIBRARIES} dlib::dlib)
