@@ -43,6 +43,9 @@
 #include <iostream>
 #include <stdio.h>
 
+#include<facedetector.h>
+#include<headposeestimator.h>
+
 using namespace cv;
 using namespace dlib;
 using namespace std;
@@ -62,12 +65,10 @@ typedef pcl::PointXYZ CloudPoint;
 
 typedef message_filters::sync_policies::ExactTime<sensor_msgs::Image, sensor_msgs::Image, sensor_msgs::CameraInfo, sensor_msgs::CameraInfo> ExactSyncPolicy;
 
-cv::Rect getRegionOfInterest(cv::Mat frame);
-void visualizeRegionOfInterest(cv::Mat frame, cv::Rect roi_b);
 void cloudViewer(pcl::PointCloud<CloudPoint>::Ptr cloud, pcl::PointCloud<CloudPoint>::Ptr cloud2, const cv::Rect roi);
 void createCloud(const cv::Mat &depth, const cv::Mat &color, pcl::PointCloud<CloudPoint>::Ptr &cloud, const cv::Rect roi);
-void pclCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_msgs::Image::ConstPtr imageDepth, const sensor_msgs::CameraInfo::ConstPtr cameraInfoColor,
-                 const sensor_msgs::CameraInfo::ConstPtr cameraInfoDepth, const cv::Rect roi, std::vector<dlib::point> keyPoints, bool detected);
+void findPose(const cv::Mat &color, const cv::Mat &depth, const sensor_msgs::CameraInfo::ConstPtr cameraInfoColor,
+              const sensor_msgs::CameraInfo::ConstPtr cameraInfoDepth, const cv::Rect &roi, std::vector<dlib::point> &keyPoints);
 
 // publisher for head pose transformation
 ros::Publisher transformPub;
@@ -79,13 +80,9 @@ string face_cascade_name = "/home/rnm_grp1/catkin_ws/src/" + projectName + "/dat
 string landmarksFileName = "/home/rnm_grp1/catkin_ws/src/" + projectName + "/data/shape_predictor_68_face_landmarks.dat";
 string topicColor = "/kinect2/qhd/image_color_rect";
 string topicDepth = "/kinect2/qhd/image_depth_rect";
-cv::CascadeClassifier face_cascade;
-pcl::PointCloud<CloudPoint>::Ptr headCloud(new pcl::PointCloud<CloudPoint>);
+
 string window_name = "Capture - Face detection";
 // bounding rectangle of face found in last image
-dlib::rectangle lastFace;
-// boolean indicating whether we have found a face in the last image
-bool foundLastFace = false;
 
 // number of keyPoints for initial pose estimation
 #define numKeyPoints 11
@@ -110,11 +107,16 @@ Eigen::Matrix<double, 3, Eigen::Dynamic> modelKeyPoints(3, numKeyPoints);
 image_window win;
 #endif
 
-shape_predictor pose_model;
+FaceDetector *faceDetector;
+HeadPoseEstimator *headPoseEstimator;
 
-pcl::PointCloud<CloudPoint>::Ptr cloud;
+#ifdef DISPLAY_CLOUD
+pcl::visualization::PCLVisualizer::Ptr cloudVisualizer(new pcl::visualization::PCLVisualizer("Cloud Viewer"));
+#endif
+
 cv::Mat cameraMatrixColor = cv::Mat::zeros(3, 3, CV_64F);
 cv::Mat lookupX, lookupY;
+
 void createLookup(size_t width, size_t height)
 {
     const float fx = 1.0f / cameraMatrixColor.at<double>(0, 0);
@@ -154,87 +156,42 @@ void readCameraInfo(const sensor_msgs::CameraInfo::ConstPtr cameraInfo, cv::Mat 
     }
 }
 
-std::pair<bool, dlib::rectangle> getFaceBoundingBox(cv_image<bgr_pixel> image) {
-  static frontal_face_detector detector = get_frontal_face_detector();
-
-  // IDEAS: Rotate image along z-axis according to last transform to improve face detection and landmark detection
-  // TODO - apply face detecion and landmark detection only on scaled clipping on current image based on last roi (scaling based on z-location of face?)
-  // TODO - handle false detections, loss of head; detect due to landmarks or face not found -> start detection based on whole image
-  // detect faces
-  std::vector<dlib::rectangle> faces = detector(image);
-  if (faces.size() > 0) {
-    return std::pair<bool, dlib::rectangle>(true, faces.front());
-  } else {
-    dlib::rectangle dummy;
-    return std::pair<bool, dlib::rectangle>(false, dummy);
-  }
-}
-
 void imageCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_msgs::Image::ConstPtr imageDepth,
                    const sensor_msgs::CameraInfo::ConstPtr cameraInfoColor, const sensor_msgs::CameraInfo::ConstPtr cameraInfoDepth)
 {
     try
     {
-        cv_bridge::CvImageConstPtr imagePtr = cv_bridge::toCvShare(imageColor, "bgr8");
-        cv::Mat image = imagePtr->image;
-        // Turn OpenCV's Mat into something dlib can deal with.  Note that this just
-        // wraps the Mat object, it doesn't copy anything.  So cimg is only valid as
-        // long as temp is valid.  Also don't do anything to temp that would cause it
-        // to reallocate the memory which stores the image as that will make cimg
-        // contain dangling pointers.  This basically means you shouldn't modify temp
-        // while using cimg.
-        cv_image<bgr_pixel> cimg(image);
-        // Detect faces
-        cv::Rect roi;
-        std::pair<bool, dlib::rectangle> getFaceResult = getFaceBoundingBox(cimg);
-        bool found = getFaceResult.first;
-        std::vector<dlib::point> keyPoints;
+        cv::Mat image, depth;
+        readImage(imageColor, image);
+        readImage(imageDepth, depth);
+        // Detect face
+        bool found = faceDetector->detectFace(image);
         if (found) {
-            // Find the pose of face
-            const dlib::rectangle face = getFaceResult.second;
-            // bounds of dlib rectangle are right, bottom exclusive
-            int minX = face.left(), minY = face.top(), maxX = face.right() + 1, maxY = face.bottom() + 1;
-
-            full_object_detection shape = pose_model(cimg, face);
-            for(int i = 0; i < numKeyPoints; i++) {
-              int partIdx = dlibKeyPointIndices[i];
-              dlib::point keyPoint = shape.part(partIdx);
-              // TODO - compare points with OBJECT_PART_NOT_PRESENT
-              keyPoints.push_back(keyPoint);
-              // adjust bounds of roi
-              //*
-              if (keyPoint.x() > maxX) maxX = keyPoint.x();
-              else if (keyPoint.x() < minX) minX = keyPoint.x();
-              if (keyPoint.y() > maxY) maxY = keyPoint.y();
-              else if (keyPoint.y() < minY) minY = keyPoint.y();
-              //*/
-            }
-            // let roi contain face and all detected keyPoints
-            roi = cv::Rect(cv::Point2i(minX, minY), cv::Point2i(maxX, maxY));
+          cv::Rect roi = faceDetector->getRoi();
+          std::vector<dlib::point> keyPoints = faceDetector->getKeyPoints();
+          findPose(image, depth, cameraInfoColor, cameraInfoDepth, roi, keyPoints);
 #if defined(DISPLAY_FACES) || defined(DISPLAY_LANDMARKS)
-            win.clear_overlay();
-            win.set_image(cimg);
+          cv_image<bgr_pixel> cimg(image);
+          win.clear_overlay();
+          win.set_image(cimg);
   #ifdef DISPLAY_LANDMARKS
-            for(int i = 0; i < numKeyPoints; i++) {
-              for(int pIdx = 0; pIdx < keyPoints.size(); pIdx++) {
-                win.add_overlay(dlib::image_window::overlay_rect(keyPoints.at(pIdx), rgb_pixel(255,0,0), std::to_string(dlibKeyPointIndices[pIdx])));
-              }
+          for(int i = 0; i < numKeyPoints; i++) {
+            for(int pIdx = 0; pIdx < keyPoints.size(); pIdx++) {
+              win.add_overlay(dlib::image_window::overlay_rect(keyPoints.at(pIdx), rgb_pixel(255,0,0), std::to_string(dlibKeyPointIndices[pIdx])));
             }
-            //win.add_overlay(render_face_detections(shape));
+          }
   #endif
   #ifdef DISPLAY_FACES
-            win.add_overlay(face);
+          dlib::rectangle face((long)roi.tl().x, (long)roi.tl().y, (long)roi.br().x - 1, (long)roi.br().y - 1);
+          win.add_overlay(face);
   #endif
 #endif
         } else {
-            // set default roi
-            roi.width = image.cols / 10;
-            roi.height = image.rows / 10;
-            roi.x = (image.cols - roi.width) / 2;
-            roi.y = (image.rows - roi.height) / 2;
+          ROS_INFO("no face detected");
         }
-        // Display it all on the screen
-        pclCallback(imageColor, imageDepth, cameraInfoColor, cameraInfoDepth, roi, keyPoints, found);
+#ifdef DISPLAY_CLOUD
+        cloudVisualizer->spinOnce(10);
+#endif
     }
     catch (cv_bridge::Exception& e)
     {
@@ -242,56 +199,10 @@ void imageCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_m
     }
 }
 
-Eigen::Matrix<double, 3, Eigen::Dynamic> mapKeyPointsTo3D(std::vector<dlib::point> keyPoints, cv::Mat depth)
-{
-  const float badPoint = std::numeric_limits<float>::quiet_NaN();
-  Eigen::Matrix<double, 3, Eigen::Dynamic> mapped(3, numKeyPoints);
-  for (int idx = 0; idx < numKeyPoints; idx++) {
-    dlib::point p = keyPoints.at(idx);
-    const float y = lookupY.at<float>(0, p.y());
-    const float *itX = lookupX.ptr<float>() + p.x();
-    const uint16_t *itD = depth.ptr<uint16_t>(p.y()) + p.x();
-    const float depthValue = *itD;
-    if (*itD == 0) {
-      mapped.col(idx) = Eigen::Vector3d(badPoint, badPoint, badPoint);
-      ROS_INFO("oh no, a bad point in mapping 2d to 3d space");
-    } else {
-      mapped.col(idx) = Eigen::Vector3d(*itX * depthValue, y * depthValue, depthValue);
-    }
-  }
-  return mapped;
-}
-
-Eigen::Matrix<double, 4, 4> getInitialHeadTransformation(std::vector<dlib::point> keyPoints, cv::Mat depth)
-{
-  // map keyPoints to 3D space ignoring NaN
-  Eigen::Matrix<double, 3, Eigen::Dynamic> cloudKeyPoints = mapKeyPointsTo3D(keyPoints, depth);
-  std::vector<int> validColIndices;
-  for (int idx = 0; idx < numKeyPoints; idx++) {
-    if (!std::isnan(cloudKeyPoints(0, idx))) {
-      validColIndices.push_back(idx);
-    }
-  }
-  Eigen::Matrix<double, 3, Eigen::Dynamic> validCloudKeyPoints(3, validColIndices.size());
-  Eigen::Matrix<double, 3, Eigen::Dynamic> validModelKeyPoints(3, validColIndices.size());
-  for (int idx = 0; idx < validColIndices.size(); idx++) {
-    validCloudKeyPoints.col(idx) = cloudKeyPoints.col(validColIndices.at(idx));
-    validModelKeyPoints.col(idx) = modelKeyPoints.col(validColIndices.at(idx));
-  }
-
-  // get transform using umeyama method including scale
-  Eigen::Matrix<double, 4, 4> transform = Eigen::umeyama(validModelKeyPoints, validCloudKeyPoints, true);
-  std::cout << "transform" << std::endl << transform << std::endl << std::flush;
-  return transform;
-}
-
-void pclCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_msgs::Image::ConstPtr imageDepth, const sensor_msgs::CameraInfo::ConstPtr cameraInfoColor,
-                 const sensor_msgs::CameraInfo::ConstPtr cameraInfoDepth, const cv::Rect roi, std::vector<dlib::point> keyPoints, bool detected)
+void findPose(const cv::Mat &color, const cv::Mat &depth, const sensor_msgs::CameraInfo::ConstPtr cameraInfoColor,
+              const sensor_msgs::CameraInfo::ConstPtr cameraInfoDepth, const cv::Rect &roi, std::vector<dlib::point> &keyPoints)
 {
     static bool cloudInitialized = false;
-    cv::Mat color, depth;
-    readImage(imageColor, color);
-    readImage(imageDepth, depth);
     if (!cloudInitialized) {
         readCameraInfo(cameraInfoColor, cameraMatrixColor);
         /*
@@ -306,82 +217,33 @@ void pclCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_msg
             color.convertTo(tmp, CV_8U, 0.02);
             cv::cvtColor(tmp, color, CV_GRAY2BGR);
         }
-        cloud = pcl::PointCloud<CloudPoint>::Ptr(new pcl::PointCloud<CloudPoint>());
-        cloud->is_dense = false;
         createLookup(color.cols, color.rows);
+        headPoseEstimator->initLookUps(lookupX, lookupY);
         cloudInitialized = true;
     }
-    cloud->height = roi.height;
-    cloud->width = roi.width;
-    cloud->points.resize(cloud->height * cloud->width);
-    createCloud(depth, color, cloud, roi);
 
-    if (detected) {
-        // filter cloud based on z value compared to centroid
-        Eigen::Vector4f centroid;
-        pcl::compute3DCentroid(*cloud, centroid);
-        pcl::PointCloud<CloudPoint>::Ptr filteredCloud(new pcl::PointCloud<CloudPoint>());
-        pcl::PassThrough<CloudPoint> pass;
-        pass.setInputCloud(cloud);
-        pass.setFilterFieldName("z");
-        pass.setFilterLimits(0.0, centroid(2, 0) + 20);
-        pass.filter(*filteredCloud);
-        /*
-        Eigen::Matrix<double, 4, 4> estimTrans = getInitialHeadTransformation(keyPoints, depth);
-        Eigen::Matrix<double, 3, Eigen::Dynamic> cloudKeyPoints = mapKeyPointsTo3D(keyPoints, depth);
-        pcl::PointCloud<CloudPoint>::Ptr modelKeyPointsCloud(new pcl::PointCloud<CloudPoint>());
-        for (int idx = 0; idx < numKeyPoints; idx++) {
-          Eigen::Vector3d col = modelKeyPoints.col(idx);
-          modelKeyPointsCloud->push_back(pcl::PointXYZ((float)col(0,0), (float)col(1,0), (float)col(2,0)));
-        }
-        pcl::transformPointCloud(*modelKeyPointsCloud, *modelKeyPointsCloud, estimTrans);
-        pcl::PointCloud<CloudPoint>::Ptr keyPointsCloud(new pcl::PointCloud<CloudPoint>());
-        for (int idx = 0; idx < numKeyPoints; idx++) {
-          Eigen::Vector3d col = cloudKeyPoints.col(idx);
-          keyPointsCloud->push_back(pcl::PointXYZ((float)col(0,0), (float)col(1,0), (float)col(2,0)));
-        }
-        cloudViewer(keyPointsCloud, modelKeyPointsCloud, cv::Rect(cv::Point2i(0, 0), cv::Point2i(color.cols, color.rows)));
-        //*/
-        std::vector<int> index;
-        pcl::PointCloud<CloudPoint>::Ptr rmNan(new pcl::PointCloud<CloudPoint>());
-        pcl::removeNaNFromPointCloud(*filteredCloud, *rmNan, index);
-        Eigen::Matrix<double, 4, 4> estimTrans = getInitialHeadTransformation(keyPoints, depth);
-        pcl::PointCloud<CloudPoint>::Ptr transformedHead(new pcl::PointCloud<CloudPoint>());
-        pcl::transformPointCloud(*headCloud, *transformedHead, estimTrans);
-        Eigen::Matrix4d transformation;
-#ifdef USE_ICP
-        pcl::IterativeClosestPoint<CloudPoint, CloudPoint> icp;
-        icp.setInputSource(transformedHead);
-        icp.setInputTarget(rmNan);
-        icp.setMaxCorrespondenceDistance(9); // 9 mm
-        icp.setRANSACOutlierRejectionThreshold(9);
-        pcl::PointCloud<CloudPoint>::Ptr Final(new pcl::PointCloud<CloudPoint>());
-        icp.align(*Final);
-        std::cout << "has converged:" << icp.hasConverged() << " score: " << icp.getFitnessScore() << std::endl;
-        std::cout << icp.getFinalTransformation() << std::endl << std::flush;
-#endif
+    std::pair<bool, Eigen::Matrix4d> transformationResult = headPoseEstimator->getTransformation(depth, roi, keyPoints);
+    if (transformationResult.first)
+    {
+      Eigen::Matrix4d transformation = transformationResult.second;
 #ifdef DISPLAY_CLOUD
-  #ifdef USE_ICP
-        cloudViewer(rmNan, Final, cv::Rect(cv::Point2i(0, 0), cv::Point2i(color.cols, color.rows)));
-        transformation.noalias() = estimTrans * icp.getFinalTransformation().cast<double>();
-  #else
-        cloudViewer(rmNan, transformedHead, cv::Rect(cv::Point2i(0, 0), cv::Point2i(color.cols, color.rows)));
-        transformation = estimTrans;
-  #endif
+      cloudViewer(headPoseEstimator->getHeadCloud(), headPoseEstimator->getTransformedModelCloud(), cv::Rect(cv::Point2i(0, 0), cv::Point2i(color.cols, color.rows)));
 #endif
-        std_msgs::Float64MultiArray msg;
-        msg.data.clear();
-        for (int idx = 0; idx < transformation.size(); idx++) {
-          msg.data.push_back(*(transformation.data() + idx));
-        }
-        transformPub.publish(msg);
+      std_msgs::Float64MultiArray msg;
+      msg.data.clear();
+      for (int idx = 0; idx < transformation.size(); idx++) {
+        msg.data.push_back(*(transformation.data() + idx));
+      }
+      transformPub.publish(msg);
+    } else
+    {
+      std::cout << "failed to detect head transformation" << std::endl << std::flush;
     }
 }
 
 void cloudViewer(pcl::PointCloud<CloudPoint>::Ptr cloud, pcl::PointCloud<CloudPoint>::Ptr cloud2, const cv::Rect roi)
 {
     static bool viewerInitialized = false;
-    static pcl::visualization::PCLVisualizer::Ptr cloudVisualizer(new pcl::visualization::PCLVisualizer("Cloud Viewer"));
     static std::string cloudName = "rendered";
 
     if (!viewerInitialized) {
@@ -409,83 +271,11 @@ void cloudViewer(pcl::PointCloud<CloudPoint>::Ptr cloud, pcl::PointCloud<CloudPo
             cloudVisualizer->updatePointCloud(cloud2, green, "cloud2");
         }
     }
-    cloudVisualizer->spinOnce(10);
 }
-
-void createCloud(const cv::Mat &depth, const cv::Mat &color, pcl::PointCloud<CloudPoint>::Ptr &cloud, const cv::Rect roi)
-{
-    const float badPoint = std::numeric_limits<float>::quiet_NaN();
-
-    #pragma omp parallel for
-    for(int r = roi.y; r < roi.y + roi.height; ++r)
-    {
-        CloudPoint *itP = &cloud->points[(r - roi.y) * roi.width];
-        const uint16_t *itD = depth.ptr<uint16_t>(r) + roi.x;
-        const cv::Vec3b *itC = color.ptr<cv::Vec3b>(r)  + roi.x;
-        const float y = lookupY.at<float>(0, r);
-        const float *itX = lookupX.ptr<float>() + roi.x;
-
-        for(size_t c = roi.x; c < (size_t)(roi.x + roi.width); ++c, ++itP, ++itD, ++itC, ++itX)
-        {
-            register const float depthValue = *itD;
-            // Check for invalid measurements
-            if(*itD == 0)
-            {
-                // not valid
-                itP->x = itP->y = itP->z = badPoint;
-#ifdef COLORED_CLOUD
-                itP->rgba = 0;
-#endif
-                continue;
-            }
-            itP->z = depthValue;
-            itP->x = *itX * depthValue;
-            itP->y = y * depthValue;
-#ifdef COLORED_CLOUD
-            itP->b = itC->val[0];
-            itP->g = itC->val[1];
-            itP->r = itC->val[2];
-            itP->a = 255;
-#endif
-        }
-    }
-}
-
 
 
 int main(int argc, char **argv)
 {
-    // load pointCloud file of head model
-    pcl::PolygonMesh mesh;
-    /*
-    if (pcl::io::loadPolygonFileSTL(headModelFileName, mesh) == 0)
-    {
-      ROS_ERROR("Failed to load STL file\n");
-    }
-    */
-    if (pcl::io::loadPCDFile<CloudPoint>(headModelFileName, *headCloud) == -1)
-    {
-      ROS_ERROR("Failed to load PCD head model file\n");
-    }
-    // load landmarks file
-    try {
-        deserialize(landmarksFileName) >> pose_model;
-    }
-    catch(serialization_error& e)
-    {
-        ROS_ERROR("You need dlib's default face landmarking model file to run this example.");
-        cout << "You can get it from the following URL: " << endl;
-        cout << "   http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2" << endl;
-        cout << endl << e.what() << endl;
-    }
-    // create pointCloud of head model, only required for stl import
-    // pcl::fromPCLPointCloud2(mesh.cloud, *headCloud);
-    pcl::RadiusOutlierRemoval<CloudPoint> outrem;
-    outrem.setInputCloud(headCloud);
-    outrem.setRadiusSearch(10);
-    outrem.setMinNeighborsInRadius(10);
-    outrem.filter(*headCloud);
-    std::cout << std::flush;
     // init model keyPoints
     modelKeyPoints.col(0) = Eigen::Vector3d(204.4, -290.0, 2236.0); // center of left ear
     modelKeyPoints.col(1) = Eigen::Vector3d(344.3, -290.4, 2245.0); // center of right ear
@@ -498,11 +288,21 @@ int main(int argc, char **argv)
     modelKeyPoints.col(8) = Eigen::Vector3d(245.5, -230.2, 2181.0); // left edge of mouth
     modelKeyPoints.col(9) = Eigen::Vector3d(308.4, -230.4, 2182.0); // right edge of mouth
     modelKeyPoints.col(10) = Eigen::Vector3d(278.3, -188.7, 2192.0); // chin
+    // initialize face detector
+    faceDetector = new FaceDetector(landmarksFileName, dlibKeyPointIndices, numKeyPoints);
+    // initialize head pose estimator
+#ifdef USE_ICP
+    bool useICP = true;
+#else
+    bool useICP = false;
+#endif
+    headPoseEstimator = new HeadPoseEstimator(headModelFileName, modelKeyPoints, useICP);
 
 #ifdef DISPLAY_HEAD_MODEL
     pcl::visualization::PCLVisualizer::Ptr headVisualizer(new pcl::visualization::PCLVisualizer("Cloud Viewer"));
     headVisualizer->addPointCloud(headCloud, "headCloud");
 #endif
+
     // initialize ros node
     ros::init(argc, argv, "pose_estimator");
     ros::NodeHandle nh;
@@ -556,6 +356,10 @@ int main(int argc, char **argv)
     }
     */
     ros::spin();
+
+    // free memory
+    delete faceDetector;
+    delete headPoseEstimator;
 }
 
 #undef DISPLAY_LANDMARKS
