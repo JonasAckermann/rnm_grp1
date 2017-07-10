@@ -187,6 +187,8 @@ void imageCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_m
   #endif
 #endif
         } else {
+          faceDetector->reset();
+          headPoseEstimator->reset();
           ROS_INFO("no face detected");
         }
 #ifdef DISPLAY_CLOUD

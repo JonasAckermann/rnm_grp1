@@ -87,6 +87,10 @@ const pcl::PointCloud<pcl::PointXYZ>::Ptr HeadPoseEstimator::getHeadCloud()
   return this->headCloud;
 }
 
+void HeadPoseEstimator::reset() {
+  this->validTransform = false;
+}
+
 
 //-------------------------------------------------------------------
 //                          Private methods

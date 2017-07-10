@@ -42,6 +42,10 @@ class FaceDetector {
      * @return
      */
     std::vector<dlib::point> getKeyPoints();
+    /**
+     * @brief reset Reset FaceDetector, i.e. set to initial state, delete references to previous detections.
+     */
+    void reset();
   private:
     // detector for face detection
     dlib::frontal_face_detector detector = dlib::get_frontal_face_detector();
