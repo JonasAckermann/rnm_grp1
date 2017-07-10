@@ -61,8 +61,7 @@ std::pair<bool, const Eigen::Matrix4d> HeadPoseEstimator::getTransformation(cons
         icp.setRANSACOutlierRejectionThreshold(9);
         pcl::PointCloud<pcl::PointXYZ>::Ptr Final(new pcl::PointCloud<pcl::PointXYZ>());
         icp.align(*Final);
-        std::cout << "has converged:" << icp.hasConverged() << " score: " << icp.getFitnessScore() << std::endl;
-        std::cout << icp.getFinalTransformation() << std::endl << std::flush;
+        std::cout << "has converged:" << icp.hasConverged() << " score: " << icp.getFitnessScore() << std::endl << std::flush;
         transformation.noalias() = icp.getFinalTransformation().cast<double>() * estimTrans;
       } else
       {
@@ -102,7 +101,7 @@ bool HeadPoseEstimator::validateTransform(const Eigen::Matrix4d &transform) {
     double norm = (this->transformedModelKeyPoints - transformedModelKeyPoints).squaredNorm();
     std::cout << "norm of transform diff: " << norm << std::endl << std::flush;
     // allow for a difference of 5 per component per column
-    return norm < 4 * 5 * 5 * this->modelKeyPoints.cols();
+    return norm < 4 * 20 * 20 * this->modelKeyPoints.cols();
   } else {
     this->transformedModelKeyPoints = transformedModelKeyPoints;
     return true;
@@ -183,7 +182,6 @@ std::pair<bool, const Eigen::Matrix4d> HeadPoseEstimator::getInitialHeadTransfor
 
     // get transform using umeyama method including scale
     Eigen::Matrix4d transform = Eigen::umeyama(validModelKeyPoints, validCloudKeyPoints, true);
-    std::cout << "transform" << std::endl << transform << std::endl << std::flush;
     return std::pair<bool, const Eigen::Matrix4d>(true, transform);
   } else
   {
