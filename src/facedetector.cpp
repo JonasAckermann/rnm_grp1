@@ -1,9 +1,10 @@
 #include "facedetector.h"
+#include "opencv2/imgproc/imgproc.hpp"
 
 //-------------------------------------------------------------------
 //                      Predeclare helper methods
 //-------------------------------------------------------------------
-const cv::Rect scaleRect(const cv::Rect &rect, float scale);
+const cv::Rect scaleRect(const cv::Rect &rect, float scale, const cv::Size maxSize);
 int calcDiff(cv::Point point1, cv::Point point2);
 
 
@@ -35,7 +36,7 @@ bool FaceDetector::detectFace(const cv::Mat &image, float scaleLastRoi)
   // IDEAS: Rotate image along z-axis according to last transform to improve face detection and landmark detection
   if (this->detected)
   {
-    return this->detectFaceInRegion(image, scaleRect(this->previousRoi, scaleLastRoi));
+    return this->detectFaceInRegion(image, scaleRect(this->previousRoi, scaleLastRoi, cv::Size(image.rows, image.cols)));
   } else
   {
     return this->detectFaceFull(image);
@@ -99,15 +100,23 @@ bool FaceDetector::detectFaceInRegion(const cv::Mat &image, const cv::Rect &regi
 
 bool FaceDetector::detectFaceFull(const cv::Mat &image)
 {
-  dlib::cv_image<dlib::bgr_pixel> cimg(image);
+  cv::Mat scaled = image;
+  cv::pyrUp(image, scaled, cv::Size(image.cols * 2, image.rows * 2));
+  dlib::cv_image<dlib::bgr_pixel> cimg(scaled);
   const std::vector<dlib::rectangle> faces = this->detector(cimg);
   if (faces.size() > 0) {
     const dlib::rectangle face = this->getMostLikelyFace(faces);
     std::tuple<bool, const cv::Rect, const std::vector<dlib::point>> detectionResult = this->detectKeyPointsAndRoi(cimg, face);
     if (std::get<0>(detectionResult))
     {
-      this->previousKeyPoints = std::get<2>(detectionResult);
-      this->previousRoi = std::get<1>(detectionResult);
+      const std::vector<dlib::point> keyPoints = std::get<2>(detectionResult);
+      const cv::Rect roi = std::get<1>(detectionResult);
+      // downscale coordinates to undo upscale effect
+      for (int idx = 0; idx < keyPoints.size(); idx++) {
+        dlib::point p = keyPoints.at(idx);
+        this->previousKeyPoints.push_back(dlib::point(p.x() >> 1, p.y() >> 1));
+      }
+      this->previousRoi = cv::Rect(cv::Point(roi.x >> 1, roi.y >> 1), cv::Point(roi.br().x >> 1, roi.br().y >> 1));
       std::cout << "detected in full image" << std::endl << std::flush;
       std::cout << "roi: " << this->previousRoi.x << ", " << this->previousRoi.y << ", "  << this->previousRoi.width << ", "  << this->previousRoi.height << ", "  << std::endl << std::flush;
       this->detected = true;
@@ -181,12 +190,30 @@ const dlib::rectangle FaceDetector::getMostLikelyFace(const std::vector<dlib::re
 //                        Helper methods
 //-------------------------------------------------------------------
 
-const cv::Rect scaleRect(const cv::Rect &rect, float scale)
+const cv::Rect scaleRect(const cv::Rect &rect, float scale, const cv::Size size)
 {
   float newWidth = rect.width * scale;
   float newHeight = rect.height * scale;
   float newX = rect.x - newWidth / 4;
   float newY = rect.y - newHeight / 4;
+  if (newX < 0) {
+    newX = 0;
+  } else if (newX > size.width) {
+    newX = size.width;
+    newWidth = 0;
+  } else if (newX + newWidth > size.width) {
+    newWidth = size.width - newX;
+  }
+  if (newY < 0) {
+    newY = 0;
+  } else if (newY > size.height) {
+    newY = size.height;
+    newHeight = 0;
+  } else if (newY + newHeight > size.height) {
+    newHeight = size.height - newY;
+  }
+  std::cout << "scaled rect: " << newX << ", " << newY << ", "  << newWidth << ", "  << newHeight << ", "  << std::endl << std::flush;
+  std::cout << "max scaled size: " << size.width << ", " << size.height << std::endl << std::flush;
   return cv::Rect(static_cast<int>(newX), static_cast<int>(newY), static_cast<int>(newWidth), static_cast<int>(newHeight));
 }
 
