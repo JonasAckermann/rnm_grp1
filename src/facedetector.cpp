@@ -62,6 +62,10 @@ std::vector<dlib::point> FaceDetector::getKeyPoints()
   }
 }
 
+void FaceDetector::reset() {
+  this->detected = false;
+}
+
 
 //-------------------------------------------------------------------
 //                          Private methods

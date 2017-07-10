@@ -57,6 +57,10 @@ class HeadPoseEstimator {
      * @return Point cloud of detected head
      */
     const pcl::PointCloud<pcl::PointXYZ>::Ptr getHeadCloud();
+    /**
+     * @brief reset Reset HeadPoseEstimator, i.e. set to initial state, remove references to preivous estimations.
+     */
+    void reset();
   private:
     cv::Mat lookUpX;
     cv::Mat lookUpY;
