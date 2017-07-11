@@ -50,10 +50,10 @@ using namespace cv;
 using namespace dlib;
 using namespace std;
 
-#define DISPLAY_LANDMARKS
+#undef DISPLAY_LANDMARKS
 #undef DISPLAY_HEAD_MODEL
-#define DISPLAY_FACES
-#define DISPLAY_CLOUD
+#undef DISPLAY_FACES
+#undef DISPLAY_CLOUD
 #define USE_ICP
 #undef COLORED_CLOUD
 
@@ -65,9 +65,11 @@ typedef pcl::PointXYZ CloudPoint;
 
 typedef message_filters::sync_policies::ExactTime<sensor_msgs::Image, sensor_msgs::Image, sensor_msgs::CameraInfo, sensor_msgs::CameraInfo> ExactSyncPolicy;
 
+#ifdef DISPLAY_CLOUD
 void cloudViewer(pcl::PointCloud<CloudPoint>::Ptr cloud, pcl::PointCloud<CloudPoint>::Ptr cloud2, const cv::Rect roi);
+#endif
 void createCloud(const cv::Mat &depth, const cv::Mat &color, pcl::PointCloud<CloudPoint>::Ptr &cloud, const cv::Rect roi);
-void findPose(const cv::Mat &color, const cv::Mat &depth, const sensor_msgs::CameraInfo::ConstPtr cameraInfoColor,
+bool findPose(const cv::Mat &color, const cv::Mat &depth, const sensor_msgs::CameraInfo::ConstPtr cameraInfoColor,
               const sensor_msgs::CameraInfo::ConstPtr cameraInfoDepth, const cv::Rect &roi, std::vector<dlib::point> &keyPoints);
 
 // publisher for head pose transformation
@@ -159,49 +161,54 @@ void readCameraInfo(const sensor_msgs::CameraInfo::ConstPtr cameraInfo, cv::Mat 
 void imageCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_msgs::Image::ConstPtr imageDepth,
                    const sensor_msgs::CameraInfo::ConstPtr cameraInfoColor, const sensor_msgs::CameraInfo::ConstPtr cameraInfoDepth)
 {
-    try
-    {
-        cv::Mat image, depth;
-        readImage(imageColor, image);
-        readImage(imageDepth, depth);
-        // Detect face
-        bool found = faceDetector->detectFace(image);
-        if (found) {
-          cv::Rect roi = faceDetector->getRoi();
-          std::vector<dlib::point> keyPoints = faceDetector->getKeyPoints();
-          findPose(image, depth, cameraInfoColor, cameraInfoDepth, roi, keyPoints);
+  static bool previouslyDetected = false;
+  static cv::Rect lastRoi;
+  static std::vector<dlib::point> lastKeyPoints;
+  try {
+    cv::Mat image, depth;
+    readImage(imageColor, image);
+    readImage(imageDepth, depth);
+    if (previouslyDetected) {
+      previouslyDetected = findPose(image, depth, cameraInfoColor, cameraInfoDepth, lastRoi, lastKeyPoints);
+    } else {
+      // Detect face
+      bool found = faceDetector->detectFace(image);
+      if (found) {
+        lastRoi = faceDetector->getRoi();
+        lastKeyPoints = faceDetector->getKeyPoints();
+        previouslyDetected = findPose(image, depth, cameraInfoColor, cameraInfoDepth, lastRoi, lastKeyPoints);
 #if defined(DISPLAY_FACES) || defined(DISPLAY_LANDMARKS)
-          cv_image<bgr_pixel> cimg(image);
-          win.clear_overlay();
-          win.set_image(cimg);
+        cv_image<bgr_pixel> cimg(image);
+        win.clear_overlay();
+        win.set_image(cimg);
   #ifdef DISPLAY_LANDMARKS
-          for(int i = 0; i < numKeyPoints; i++) {
-            for(int pIdx = 0; pIdx < keyPoints.size(); pIdx++) {
-              win.add_overlay(dlib::image_window::overlay_rect(keyPoints.at(pIdx), rgb_pixel(255,0,0), std::to_string(dlibKeyPointIndices[pIdx])));
-            }
+        for(int i = 0; i < numKeyPoints; i++) {
+          for(int pIdx = 0; pIdx < keyPoints.size(); pIdx++) {
+            win.add_overlay(dlib::image_window::overlay_rect(keyPoints.at(pIdx), rgb_pixel(255,0,0), std::to_string(dlibKeyPointIndices[pIdx])));
           }
+        }
   #endif
   #ifdef DISPLAY_FACES
-          dlib::rectangle face((long)roi.tl().x, (long)roi.tl().y, (long)roi.br().x - 1, (long)roi.br().y - 1);
-          win.add_overlay(face);
+        dlib::rectangle face((long)roi.tl().x, (long)roi.tl().y, (long)roi.br().x - 1, (long)roi.br().y - 1);
+        win.add_overlay(face);
   #endif
 #endif
-        } else {
-          faceDetector->reset();
-          headPoseEstimator->reset();
-          ROS_INFO("no face detected");
-        }
+      }
+    }
+    if (!previouslyDetected) {
+      faceDetector->reset();
+      headPoseEstimator->reset();
+      ROS_INFO("pose estimation failed");
+    }
 #ifdef DISPLAY_CLOUD
-        cloudVisualizer->spinOnce(10);
+    cloudVisualizer->spinOnce(10);
 #endif
-    }
-    catch (cv_bridge::Exception& e)
-    {
-        ROS_ERROR("Could not convert from '%s' to 'bgr8'.", imageColor->encoding.c_str());
-    }
+  } catch (cv_bridge::Exception& e) {
+      ROS_ERROR("Could not convert from '%s' to 'bgr8'.", imageColor->encoding.c_str());
+  }
 }
 
-void findPose(const cv::Mat &color, const cv::Mat &depth, const sensor_msgs::CameraInfo::ConstPtr cameraInfoColor,
+bool findPose(const cv::Mat &color, const cv::Mat &depth, const sensor_msgs::CameraInfo::ConstPtr cameraInfoColor,
               const sensor_msgs::CameraInfo::ConstPtr cameraInfoDepth, const cv::Rect &roi, std::vector<dlib::point> &keyPoints)
 {
     static bool cloudInitialized = false;
@@ -237,12 +244,14 @@ void findPose(const cv::Mat &color, const cv::Mat &depth, const sensor_msgs::Cam
         msg.data.push_back(*(transformation.data() + idx));
       }
       transformPub.publish(msg);
-    } else
-    {
+      return true;
+    } else {
       std::cout << "failed to detect head transformation" << std::endl << std::flush;
+      return false;
     }
 }
 
+#ifdef DISPLAY_CLOUD
 void cloudViewer(pcl::PointCloud<CloudPoint>::Ptr cloud, pcl::PointCloud<CloudPoint>::Ptr cloud2, const cv::Rect roi)
 {
     static bool viewerInitialized = false;
@@ -274,6 +283,7 @@ void cloudViewer(pcl::PointCloud<CloudPoint>::Ptr cloud, pcl::PointCloud<CloudPo
         }
     }
 }
+#endif
 
 
 int main(int argc, char **argv)
@@ -298,7 +308,7 @@ int main(int argc, char **argv)
 #else
     bool useICP = false;
 #endif
-    headPoseEstimator = new HeadPoseEstimator(headModelFileName, modelKeyPoints, useICP);
+    headPoseEstimator = new HeadPoseEstimator(headModelFileName, modelKeyPoints, useICP, 5.0f);
 
 #ifdef DISPLAY_HEAD_MODEL
     pcl::visualization::PCLVisualizer::Ptr headVisualizer(new pcl::visualization::PCLVisualizer("Cloud Viewer"));

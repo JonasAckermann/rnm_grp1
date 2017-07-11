@@ -27,8 +27,9 @@ class HeadPoseEstimator {
      * @param headModelFilePath Path to file containing point cloud of head model
      * @param modelKeyPoints list of keyPoints in point cloud of head model
      * @param useICP true if icp shall be used, otherwise transformation from estimation is returned
+     * @param gridSize size of grid for voxel filter applied to point clouds in mm
      */
-    HeadPoseEstimator(const std::string &headModelFilePath, const Eigen::Matrix3Xd &modelKeyPoints, bool useICP = true);
+    HeadPoseEstimator(const std::string &headModelFilePath, const Eigen::Matrix3Xd &modelKeyPoints, bool useICP = true, float gridSize = 5.0f);
     /**
      * @brief initLookUps Initialize the lookUp tables for 2D to 3D point conversion
      * @param lookUpX
@@ -62,6 +63,8 @@ class HeadPoseEstimator {
      */
     void reset();
   private:
+    // size of grid for voxel filter in mm
+    const float gridSize;
     cv::Mat lookUpX;
     cv::Mat lookUpY;
     bool useICP = true;
@@ -74,6 +77,12 @@ class HeadPoseEstimator {
     bool validTransform = false;
     Eigen::Matrix4d lastTransform;
 
+    /**
+     * @brief getTransformationUsingTransform Get transformation of headCloud using given transform as initial guess.
+     * @param transform Initial guess to optimize
+     * @return true if a valid transformation was found, the found transformation
+     */
+    std::pair<bool, Eigen::Matrix4d> getTransformationUsingTransform(const Eigen::Matrix4d &transform);
     /**
      * @brief validateTransform Validates given transformation by comparing transformed modelKeyPoints with modelKeyPoints transformed by previous transformation.
      * @param transform Transform to validate

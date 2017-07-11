@@ -12,8 +12,8 @@ int calcDiff(cv::Point point1, cv::Point point2);
 //                          Public methods
 //-------------------------------------------------------------------
 
-FaceDetector::FaceDetector(const std::string &landmarksFilePath, int * const keyPointIndices, int numKeyPoints)
-{
+FaceDetector::FaceDetector(const std::string &landmarksFilePath, int * const keyPointIndices, int numKeyPoints, unsigned char skipFrames)
+  : skipFrames(skipFrames), numKeyPoints(numKeyPoints), keyPointIndices(keyPointIndices), skipCounter(skipFrames) {
   // load landmarks file
   try {
       dlib::deserialize(landmarksFilePath) >> this->pose_model;
@@ -25,46 +25,44 @@ FaceDetector::FaceDetector(const std::string &landmarksFilePath, int * const key
       std::cout << std::endl << e.what() << std::endl << std::flush;
       throw e;
   }
-  this->keyPointIndices = keyPointIndices;
-  this->numKeyPoints = numKeyPoints;
 }
 
-bool FaceDetector::detectFace(const cv::Mat &image, float scaleLastRoi)
-{
+bool FaceDetector::detectFace(const cv::Mat &image, float scaleLastRoi) {
   this->previousKeyPoints.clear();
   // detect face in image
   // IDEAS: Rotate image along z-axis according to last transform to improve face detection and landmark detection
-  if (this->detected)
-  {
-    return this->detectFaceInRegion(image, scaleRect(this->previousRoi, scaleLastRoi, cv::Size(image.rows, image.cols)));
-  } else
-  {
+  if (this->detectionState == INITIAL) {
+    std::cout << "detect face in full image" << std::endl << std::flush;
     return this->detectFaceFull(image);
+  } else if (this->detectionState == FOUND_ROUGH_ROI || this->skipCounter == 0) {
+    this->skipCounter = this->skipFrames;
+    std::cout << "detect face in scaled roi, skipCounter: " << this->skipCounter << std::endl << std::flush;
+    return this->detectFaceInRegion(image, scaleRect(this->previousRoi, scaleLastRoi, cv::Size(image.rows, image.cols)));
+  } else {
+    this->skipCounter--;
+    std::cout << "detect landmarks only, skipCounter: " << this->skipCounter << std::endl << std::flush;
+    return this->detectFaceByLandmarks(image, this->previousRoi);
   }
 }
 
-cv::Rect FaceDetector::getRoi()
-{
-  if (this->detected)
-  {
-    return this->previousRoi;
-  } else {
+cv::Rect FaceDetector::getRoi() {
+  if (this->detectionState == INITIAL) {
     throw std::logic_error("invalid state, invocation of getBoundingBox but face has not been detected");
+  } else {
+    return this->previousRoi;
   }
 }
 
-std::vector<dlib::point> FaceDetector::getKeyPoints()
-{
-  if (this->detected)
-  {
-    return this->previousKeyPoints;
-  } else {
+std::vector<dlib::point> FaceDetector::getKeyPoints() {
+  if (this->detectionState == INITIAL) {
     throw std::logic_error("invalid state, invocation of getKeyPoints but face has not been detected");
+  } else {
+    return this->previousKeyPoints;
   }
 }
 
 void FaceDetector::reset() {
-  this->detected = false;
+  this->detectionState = INITIAL;
 }
 
 
@@ -72,13 +70,25 @@ void FaceDetector::reset() {
 //                          Private methods
 //-------------------------------------------------------------------
 
-bool FaceDetector::detectFaceInRegion(const cv::Mat &image, const cv::Rect &region)
-{
+bool FaceDetector::detectFaceByLandmarks(const cv::Mat &image, const cv::Rect &roi) {
+  dlib::cv_image<dlib::bgr_pixel> cimg(image);
+  dlib::rectangle face = dlib::rectangle((long)roi.x, (long)roi.y, (long)roi.br().x - 1, (long)roi.br().y - 1);
+  std::tuple<bool, const cv::Rect, const std::vector<dlib::point>> detectionResult = this->detectKeyPointsAndRoi(cimg, face);
+  if (std::get<0>(detectionResult)) {
+    // previous roi remanes unchanged (could update it to contain all keyPoints)
+    this->previousKeyPoints = std::get<2>(detectionResult);
+    return true;
+  } else {
+    this->detectionState = FOUND_ROUGH_ROI;
+    return false;
+  }
+}
+
+bool FaceDetector::detectFaceInRegion(const cv::Mat &image, const cv::Rect &region) {
   // extract region from image
   const cv::Mat croppedImage = image(region);
   bool success = this->detectFaceFull(croppedImage);
-  if (success)
-  {
+  if (success) {
     std::cout << "detected in cropped image" << std::endl << std::flush;
     // adjust previousRoi and previousKeyPoints according to region, i.e. translate
     this->previousRoi = cv::Rect(this->previousRoi.x + region.x, this->previousRoi.y + region.y, this->previousRoi.width, this->previousRoi.height);
@@ -89,17 +99,16 @@ bool FaceDetector::detectFaceInRegion(const cv::Mat &image, const cv::Rect &regi
         this->previousKeyPoints.at(idx) = dlib::point(kp.x() + region.x, kp.y() + region.y);
       }
     }
-    this->detected = true;
+    this->detectionState = FOUND_ROI;
     return true;
   } else {
     std::cout << "failed to detect in cropped image" << std::endl << std::flush;
     std::cout << "region: " << region.x << ", " << region.y << ", "  << region.width << ", "  << region.height  << std::endl << std::flush;
-    return this->detectFaceFull(image);
+    return false;
   }
 }
 
-bool FaceDetector::detectFaceFull(const cv::Mat &image)
-{
+bool FaceDetector::detectFaceFull(const cv::Mat &image) {
   cv::Mat scaled = image;
   cv::pyrUp(image, scaled, cv::Size(image.cols * 2, image.rows * 2));
   dlib::cv_image<dlib::bgr_pixel> cimg(scaled);
@@ -119,16 +128,16 @@ bool FaceDetector::detectFaceFull(const cv::Mat &image)
       this->previousRoi = cv::Rect(cv::Point(roi.x >> 1, roi.y >> 1), cv::Point(roi.br().x >> 1, roi.br().y >> 1));
       std::cout << "detected in full image" << std::endl << std::flush;
       std::cout << "roi: " << this->previousRoi.x << ", " << this->previousRoi.y << ", "  << this->previousRoi.width << ", "  << this->previousRoi.height << ", "  << std::endl << std::flush;
-      this->detected = true;
+      this->detectionState = FOUND_ROUGH_ROI;
     } else {
       std::cout << "Failed to detect enough key points" << std::endl << std::flush;
-      this->detected = false;
+      this->detectionState = INITIAL;
     }
   } else {
     std::cout << "Failed to find a face in the full image" << std::endl << std::flush;
-    this->detected = false;
+    this->detectionState = INITIAL;
   }
-  return this->detected;
+  return this->detectionState != INITIAL;
 }
 
 std::tuple<bool, const cv::Rect, const std::vector<dlib::point>> FaceDetector::detectKeyPointsAndRoi(const dlib::cv_image<dlib::bgr_pixel> &image, const dlib::rectangle &face)
@@ -157,10 +166,8 @@ std::tuple<bool, const cv::Rect, const std::vector<dlib::point>> FaceDetector::d
   return std::make_tuple(detected, cv::Rect(cv::Point(minX, minY), cv::Point(maxX, maxY)), keyPoints);
 }
 
-const dlib::rectangle FaceDetector::getMostLikelyFace(const std::vector<dlib::rectangle> &faces)
-{
-  if (!this->detected || faces.size() == 1)
-  {
+const dlib::rectangle FaceDetector::getMostLikelyFace(const std::vector<dlib::rectangle> &faces) {
+  if (!this->detectionState == INITIAL || faces.size() == 1) {
     return faces.front();
   } else {
     // calculate previous width, height and center for comparision

@@ -1,15 +1,14 @@
 #include "headposeestimator.h"
-
+#include <pcl/filters/voxel_grid.h>
 
 //-------------------------------------------------------------------
 //                          Public methods
 //-------------------------------------------------------------------
 
-HeadPoseEstimator::HeadPoseEstimator(const std::string &headModelFilePath, const Eigen::Matrix3Xd &modelKeyPoints, bool useICP)
-  : modelKeyPoints(modelKeyPoints), modelPointCloud(pcl::PointCloud<pcl::PointXYZ>::Ptr(new pcl::PointCloud<pcl::PointXYZ>())), useICP(useICP)
+HeadPoseEstimator::HeadPoseEstimator(const std::string &headModelFilePath, const Eigen::Matrix3Xd &modelKeyPoints, bool useICP, float gridSize)
+  : modelKeyPoints(modelKeyPoints), modelPointCloud(pcl::PointCloud<pcl::PointXYZ>::Ptr(new pcl::PointCloud<pcl::PointXYZ>())), useICP(useICP), gridSize(gridSize)
 {
-  if (pcl::io::loadPCDFile<pcl::PointXYZ>(headModelFilePath, *this->modelPointCloud) == -1)
-  {
+  if (pcl::io::loadPCDFile<pcl::PointXYZ>(headModelFilePath, *this->modelPointCloud) == -1) {
     std::cout << "Failed to load PCD head model file" << std::endl << std::flush;
     throw std::invalid_argument("PCD file for head model not found");
   }
@@ -21,6 +20,10 @@ HeadPoseEstimator::HeadPoseEstimator(const std::string &headModelFilePath, const
   outrem.setRadiusSearch(10);
   outrem.setMinNeighborsInRadius(10);
   outrem.filter(*this->modelPointCloud);
+  pcl::VoxelGrid<pcl::PointXYZ> filter;
+  filter.setInputCloud(this->modelPointCloud);
+  filter.setLeafSize(this->gridSize, this->gridSize, this->gridSize);
+  filter.filter(*this->modelPointCloud);
 }
 
 const float HeadPoseEstimator::badPoint = std::numeric_limits<float>::quiet_NaN();
@@ -36,42 +39,25 @@ void HeadPoseEstimator::initLookUps(cv::Mat &lookUpX, cv::Mat &lookUpY)
 
 std::pair<bool, const Eigen::Matrix4d> HeadPoseEstimator::getTransformation(const cv::Mat &depthImage, const cv::Rect &roi, const std::vector<dlib::point> &keyPoints)
 {
-  if (!this->lookUpsInitialized)
-  {
+  if (!this->lookUpsInitialized) {
     throw std::logic_error("invalid state, invocation of getTransformation but lookUps have not been initialized");
-  } else
-  {
+  } else {
+    std::pair<bool, Eigen::Matrix4d> transformResult;
     this->updateHeadCloud(depthImage, roi);
-    std::pair<bool, const Eigen::Matrix4d> estimTransResult = this->getInitialHeadTransformation(keyPoints, depthImage);
-    if (!estimTransResult.first)
-    {
-      this->validTransform = false;
-    } else
-    {
-      Eigen::Matrix4d estimTrans = estimTransResult.second;
-      pcl::PointCloud<pcl::PointXYZ>::Ptr transformedModelCloud(new pcl::PointCloud<pcl::PointXYZ>());
-      pcl::transformPointCloud(*this->modelPointCloud, *transformedModelCloud, estimTrans);
-      Eigen::Matrix4d transformation;
-      if (this->useICP)
-      {
-        pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp;
-        icp.setInputSource(transformedModelCloud);
-        icp.setInputTarget(this->headCloud);
-        icp.setMaxCorrespondenceDistance(9); // 9 mm
-        icp.setRANSACOutlierRejectionThreshold(9);
-        pcl::PointCloud<pcl::PointXYZ>::Ptr Final(new pcl::PointCloud<pcl::PointXYZ>());
-        icp.align(*Final);
-        std::cout << "has converged:" << icp.hasConverged() << " score: " << icp.getFitnessScore() << std::endl << std::flush;
-        transformation.noalias() = icp.getFinalTransformation().cast<double>() * estimTrans;
-      } else
-      {
-        transformation = estimTrans;
+    if (this->validTransform) {
+      transformResult = this->getTransformationUsingTransform(this->lastTransform);
+    } else {
+      std::pair<bool, const Eigen::Matrix4d> estimTransResult = this->getInitialHeadTransformation(keyPoints, depthImage);
+      if (!estimTransResult.first) {
+        this->validTransform = false;
+      } else {
+        transformResult = this->getTransformationUsingTransform(estimTransResult.second);
       }
-      this->validTransform = this->validateTransform(transformation);
-      this->lastTransform = transformation;
     }
+    this->validTransform = transformResult.first;
+    this->lastTransform = transformResult.second;
+    return std::pair<bool, Eigen::Matrix4d>(this->validTransform, this->lastTransform);
   }
-  return std::pair<bool, Eigen::Matrix4d>(this->validTransform, this->lastTransform);
 }
 
 const pcl::PointCloud<pcl::PointXYZ>::Ptr HeadPoseEstimator::getTransformedModelCloud()
@@ -94,6 +80,30 @@ void HeadPoseEstimator::reset() {
 //-------------------------------------------------------------------
 //                          Private methods
 //-------------------------------------------------------------------
+
+std::pair<bool, Eigen::Matrix4d> HeadPoseEstimator::getTransformationUsingTransform(const Eigen::Matrix4d &transform) {
+  pcl::PointCloud<pcl::PointXYZ>::Ptr transformedModelCloud(new pcl::PointCloud<pcl::PointXYZ>());
+  pcl::transformPointCloud(*this->modelPointCloud, *transformedModelCloud, transform);
+  Eigen::Matrix4d transformation;
+  bool converged = false;
+  if (this->useICP) {
+    pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp;
+    icp.setInputSource(transformedModelCloud);
+    icp.setInputTarget(this->headCloud);
+    icp.setMaxCorrespondenceDistance(9); // 9 mm
+    icp.setRANSACOutlierRejectionThreshold(9);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr Final(new pcl::PointCloud<pcl::PointXYZ>());
+    icp.align(*Final);
+    std::cout << "has converged:" << icp.hasConverged() << " score: " << icp.getFitnessScore() << std::endl << std::flush;
+    converged = icp.hasConverged();
+    transformation.noalias() = icp.getFinalTransformation().cast<double>() * transform;
+  } else {
+    converged = true;
+    transformation = transform;
+  }
+  bool isTransformValid = converged && this->validateTransform(transformation);
+  return std::pair<bool, Eigen::Matrix4d>(isTransformValid, transformation);
+}
 
 bool HeadPoseEstimator::validateTransform(const Eigen::Matrix4d &transform) {
   Eigen::Matrix4Xd transformedModelKeyPoints = transform * this->expandedModelKeyPoints;
@@ -145,20 +155,28 @@ void HeadPoseEstimator::writeHeadCloud(const cv::Mat &depthImage, const cv::Rect
   }
 }
 
-void HeadPoseEstimator::filterHeadCloud()
-{
-  Eigen::Vector4f centroid;
-  pcl::compute3DCentroid(*this->headCloud, centroid);
-  pcl::PointCloud<pcl::PointXYZ>::Ptr filteredCloud(new pcl::PointCloud<pcl::PointXYZ>());
-  pcl::PassThrough<pcl::PointXYZ> pass;
-  pass.setInputCloud(this->headCloud);
-  pass.setFilterFieldName("z");
-  pass.setFilterLimits(0.0, centroid(2, 0) + 20);
-  pass.filter(*filteredCloud);
+void HeadPoseEstimator::filterHeadCloud() {
+  // remove NaN values from cloud
   std::vector<int> index;
   pcl::PointCloud<pcl::PointXYZ>::Ptr rmNan(new pcl::PointCloud<pcl::PointXYZ>());
-  pcl::removeNaNFromPointCloud(*filteredCloud, *rmNan, index);
-  this->headCloud = rmNan;
+  pcl::removeNaNFromPointCloud(*this->headCloud, *rmNan, index);
+  // compute centroid of cloud
+  Eigen::Vector4f centroid;
+  pcl::compute3DCentroid(*rmNan, centroid);
+  // filter background based on distance from centroid along z-axis
+  pcl::PointCloud<pcl::PointXYZ>::Ptr zFilteredCloud(new pcl::PointCloud<pcl::PointXYZ>());
+  pcl::PassThrough<pcl::PointXYZ> zPass;
+  zPass.setInputCloud(rmNan);
+  zPass.setFilterFieldName("z");
+  zPass.setFilterLimits(0.0, centroid(2, 0) + 20);
+  zPass.filter(*zFilteredCloud);
+  // filter using voxel grid
+  pcl::VoxelGrid<pcl::PointXYZ> voxelFilter;
+  pcl::PointCloud<pcl::PointXYZ>::Ptr voxelFilteredCloud(new pcl::PointCloud<pcl::PointXYZ>());
+  voxelFilter.setInputCloud(zFilteredCloud);
+  voxelFilter.setLeafSize(this->gridSize, this->gridSize, this->gridSize);
+  voxelFilter.filter(*voxelFilteredCloud);
+  this->headCloud = voxelFilteredCloud;
 }
 
 std::pair<bool, const Eigen::Matrix4d> HeadPoseEstimator::getInitialHeadTransformation(const std::vector<dlib::point> &keyPoints, const cv::Mat &depthImage)

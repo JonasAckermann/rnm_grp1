@@ -6,6 +6,11 @@
 #include <dlib/image_processing/frontal_face_detector.h>
 #include <stdio.h>
 
+// detection states
+#define INITIAL 0
+#define FOUND_ROUGH_ROI 1
+#define FOUND_ROI 2
+
 /**
  * @brief The FaceDetector class
  * Performs face and facial landmark detection.
@@ -20,7 +25,7 @@ class FaceDetector {
      * @param keyPointIndices Indices of keyPoints of intererst
      * @param numKeyPoints Number of keyPoints of interest
      */
-    FaceDetector(const std::string &landmarksFilePath, int * const keyPointIndices, int numKeyPoints);
+    FaceDetector(const std::string &landmarksFilePath, int * const keyPointIndices, int numKeyPoints, unsigned char skipFrames = 3);
     /**
      * @brief detectFace Detect a face in given image, if a face has previously been detected this method
      * will try to follow that face
@@ -49,6 +54,10 @@ class FaceDetector {
   private:
     // detector for face detection
     dlib::frontal_face_detector detector = dlib::get_frontal_face_detector();
+    // number of frames to skip before a face detection should be performed
+    const unsigned char skipFrames;
+    // number of frames to skip before next face detection should be performed
+    unsigned char skipCounter;
     // detector for facial landmarks
     dlib::shape_predictor pose_model;
     // the roi found in last successful invocation of detectFace
@@ -56,12 +65,19 @@ class FaceDetector {
     // keyPoints found in last successful invocation of detectFace
     std::vector<dlib::point> previousKeyPoints;
     // true if last invocation of detectFace was successful
-    bool detected = false;
+    char detectionState = INITIAL;
     // indices of keyPoints of interest
     int * keyPointIndices;
     // number of keyPoints of interest
     int numKeyPoints;
 
+    /**
+     * @brief detectFaceByLandmarks
+     * @param image
+     * @param roi
+     * @return
+     */
+    bool detectFaceByLandmarks(const cv::Mat &image, const cv::Rect &roi);
     /**
      * @brief detectFaceInRegion detect a face in a given region. This method also updates previousRoi and previousKeyPoints.
      * @param image Image in which to search for a face
