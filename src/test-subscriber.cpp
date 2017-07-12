@@ -57,6 +57,10 @@ using namespace std;
 #define USE_ICP
 #undef COLORED_CLOUD
 
+#define PARAM_PUB_TOPIC "pubtopic"
+#define DEFAULT_PUB_TOPIC "/headPose/transform"
+
+
 #ifdef COLORED_CLOUD
 typedef pcl::PointXYZRGBA CloudPoint;
 #else
@@ -77,7 +81,8 @@ ros::Publisher transformPub;
 
 string projectName = "head_pose";
 // string headModelFileName = "/home/rnm_grp1/catkin_ws/src/" + projectName + "/data/head_model.stl";
-string headModelFileName = "/home/rnm_grp1/catkin_ws/src/" + projectName + "/data/resampled_pc.pcd";
+// string headModelFileName = "/home/rnm_grp1/catkin_ws/src/" + projectName + "/data/resampled_pc.pcd";
+string headModelFileName = "/home/rnm_grp1/catkin_ws/src/" + projectName + "/data/model_grid_sampled_4mm.pcd";
 string face_cascade_name = "/home/rnm_grp1/catkin_ws/src/" + projectName + "/data/cascades.xml";
 string landmarksFileName = "/home/rnm_grp1/catkin_ws/src/" + projectName + "/data/shape_predictor_68_face_landmarks.dat";
 string topicColor = "/kinect2/qhd/image_color_rect";
@@ -289,6 +294,7 @@ void cloudViewer(pcl::PointCloud<CloudPoint>::Ptr cloud, pcl::PointCloud<CloudPo
 int main(int argc, char **argv)
 {
     // init model keyPoints
+  /* Points of resampled_pc.pcd
     modelKeyPoints.col(0) = Eigen::Vector3d(204.4, -290.0, 2236.0); // center of left ear
     modelKeyPoints.col(1) = Eigen::Vector3d(344.3, -290.4, 2245.0); // center of right ear
     modelKeyPoints.col(2) = Eigen::Vector3d(276.6, -291.2, 2148.0); // top of nose
@@ -300,6 +306,18 @@ int main(int argc, char **argv)
     modelKeyPoints.col(8) = Eigen::Vector3d(245.5, -230.2, 2181.0); // left edge of mouth
     modelKeyPoints.col(9) = Eigen::Vector3d(308.4, -230.4, 2182.0); // right edge of mouth
     modelKeyPoints.col(10) = Eigen::Vector3d(278.3, -188.7, 2192.0); // chin
+    */
+  modelKeyPoints.col(0) = Eigen::Vector3d(-0.06914, 0.00624, 0.037); // center of left ear
+  modelKeyPoints.col(1) = Eigen::Vector3d(0.06801, 0.01137, 0.03813); // center of right ear
+  modelKeyPoints.col(2) = Eigen::Vector3d(-0.002971, 0.03382, 0.1116); // top of nose
+  modelKeyPoints.col(3) = Eigen::Vector3d(-0.003074, -0.01089, 0.1203); // bottom of nose
+  modelKeyPoints.col(4) = Eigen::Vector3d(-0.05076, 0.0351, 0.08769); // left edge of left eye
+  modelKeyPoints.col(5) = Eigen::Vector3d(-0.01213, 0.03477, 0.09191); // right edge of left eye
+  modelKeyPoints.col(6) = Eigen::Vector3d(0.01658, 0.03404, 0.09033); // left edge of right eye
+  modelKeyPoints.col(7) = Eigen::Vector3d(0.047649, 0.03502, 0.09064); // right edge of right eye
+  modelKeyPoints.col(8) = Eigen::Vector3d(-0.02486, -0.03316, 0.09683); // left edge of mouth
+  modelKeyPoints.col(9) = Eigen::Vector3d(0.02386, -0.03296, 0.1016); // right edge of mouth
+  modelKeyPoints.col(10) = Eigen::Vector3d(-0.002986, -0.07954, 0.09764); // chin
     // initialize face detector
     faceDetector = new FaceDetector(landmarksFileName, dlibKeyPointIndices, numKeyPoints);
     // initialize head pose estimator
@@ -308,16 +326,24 @@ int main(int argc, char **argv)
 #else
     bool useICP = false;
 #endif
-    headPoseEstimator = new HeadPoseEstimator(headModelFileName, modelKeyPoints, useICP, 5.0f);
+    headPoseEstimator = new HeadPoseEstimator(headModelFileName, modelKeyPoints, useICP, 5.0f, 1000);
 
 #ifdef DISPLAY_HEAD_MODEL
     pcl::visualization::PCLVisualizer::Ptr headVisualizer(new pcl::visualization::PCLVisualizer("Cloud Viewer"));
-    headVisualizer->addPointCloud(headCloud, "headCloud");
+    headVisualizer->addPointCloud(headPoseEstimator->getTransformedModelCloud(), "headCloud");
 #endif
 
     // initialize ros node
     ros::init(argc, argv, "pose_estimator");
     ros::NodeHandle nh;
+
+    // get console args, TODO - doesn't work
+    std::string pubTopic;
+    if (!nh.getParam(PARAM_PUB_TOPIC, pubTopic)) {
+      pubTopic = DEFAULT_PUB_TOPIC;
+    }
+    std::cout << PARAM_PUB_TOPIC << ": " << pubTopic << std::endl << std::flush;
+
     image_transport::ImageTransport it(nh);
 
     // taken from kinect2_viewer to create pointcloud
@@ -334,39 +360,11 @@ int main(int argc, char **argv)
 
     message_filters::Synchronizer<ExactSyncPolicy> * syncExact = new message_filters::Synchronizer<ExactSyncPolicy>(ExactSyncPolicy(1), *subImageColor, *subImageDepth, *subCameraInfoColor, *subCameraInfoDepth);
 
-    transformPub = nh.advertise<std_msgs::Float64MultiArray>("/headPose/transform", 100);
+    transformPub = nh.advertise<std_msgs::Float64MultiArray>(pubTopic, 100);
 
     // setup callback
     syncExact->registerCallback(imageCallback);
 
-    /*
-    pcl::PointCloud<CloudPoint>::Ptr ownCloud(new pcl::PointCloud<CloudPoint>);
-    if (pcl::io::loadPCDFile<CloudPoint>("/home/rnm_grp1/catkin_ws/src/" + projectName + "/data/translated_pc.pcd", *ownCloud) == -1)
-    {
-      ROS_ERROR("Failed to load PCD ownCloud file\n");
-    }
-    std::vector<int> index;
-    pcl::PointCloud<CloudPoint>::Ptr rmNan(new pcl::PointCloud<CloudPoint>());
-    pcl::removeNaNFromPointCloud(*ownCloud, *rmNan, index);
-    pcl::IterativeClosestPoint<CloudPoint, CloudPoint> icp;
-    icp.setInputSource(rmNan);
-    icp.setInputTarget(headCloud);
-    // icp.setMaxCorrespondenceDistance(0.5f);
-    pcl::PointCloud<CloudPoint>::Ptr Final(new pcl::PointCloud<CloudPoint>());
-    icp.align(*Final);
-    std::cout << "has converged:" << icp.hasConverged() << " score: " << icp.getFitnessScore() << std::endl;
-    std::cout << icp.getFinalTransformation() << std::endl << std::flush;
-    pcl::visualization::PCLVisualizer::Ptr headVisualizer(new pcl::visualization::PCLVisualizer("Cloud Viewer"));
-    pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> red(headCloud, 255, 0, 0);
-    headVisualizer->addPointCloud(headCloud, red, "headCloud");
-    pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> green(Final, 0, 255, 0);
-    headVisualizer->addPointCloud(Final, green, "finalCloud");
-    pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> blue(ownCloud, 0, 0, 255);
-    headVisualizer->addPointCloud(ownCloud, blue, "ownCloud");
-    while(true) {
-        headVisualizer->spinOnce(10);
-    }
-    */
     ros::spin();
 
     // free memory

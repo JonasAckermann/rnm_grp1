@@ -28,8 +28,9 @@ class HeadPoseEstimator {
      * @param modelKeyPoints list of keyPoints in point cloud of head model
      * @param useICP true if icp shall be used, otherwise transformation from estimation is returned
      * @param gridSize size of grid for voxel filter applied to point clouds in mm
+     * @param modelScale scale of headModel relative to mm
      */
-    HeadPoseEstimator(const std::string &headModelFilePath, const Eigen::Matrix3Xd &modelKeyPoints, bool useICP = true, float gridSize = 5.0f);
+    HeadPoseEstimator(const std::string &headModelFilePath, const Eigen::Matrix3Xd &modelKeyPoints, bool useICP = true, float gridSize = 5.0f, unsigned short modelScale = 1000);
     /**
      * @brief initLookUps Initialize the lookUp tables for 2D to 3D point conversion
      * @param lookUpX

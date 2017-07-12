@@ -5,7 +5,7 @@
 //                          Public methods
 //-------------------------------------------------------------------
 
-HeadPoseEstimator::HeadPoseEstimator(const std::string &headModelFilePath, const Eigen::Matrix3Xd &modelKeyPoints, bool useICP, float gridSize)
+HeadPoseEstimator::HeadPoseEstimator(const std::string &headModelFilePath, const Eigen::Matrix3Xd &modelKeyPoints, bool useICP, float gridSize, unsigned short modelScale)
   : modelKeyPoints(modelKeyPoints), modelPointCloud(pcl::PointCloud<pcl::PointXYZ>::Ptr(new pcl::PointCloud<pcl::PointXYZ>())), useICP(useICP), gridSize(gridSize)
 {
   if (pcl::io::loadPCDFile<pcl::PointXYZ>(headModelFilePath, *this->modelPointCloud) == -1) {
@@ -22,7 +22,8 @@ HeadPoseEstimator::HeadPoseEstimator(const std::string &headModelFilePath, const
   outrem.filter(*this->modelPointCloud);
   pcl::VoxelGrid<pcl::PointXYZ> filter;
   filter.setInputCloud(this->modelPointCloud);
-  filter.setLeafSize(this->gridSize, this->gridSize, this->gridSize);
+  const float modelGridSize = this->gridSize / modelScale;
+  filter.setLeafSize(modelGridSize, modelGridSize, modelGridSize);
   filter.filter(*this->modelPointCloud);
 }
 
