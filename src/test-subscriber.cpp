@@ -52,7 +52,7 @@ using namespace std;
 
 #undef DISPLAY_LANDMARKS
 #undef DISPLAY_HEAD_MODEL
-#undef DISPLAY_FACES
+#define DISPLAY_FACES
 #undef DISPLAY_CLOUD
 #define USE_ICP
 #undef COLORED_CLOUD
@@ -194,14 +194,13 @@ void imageCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_m
         }
   #endif
   #ifdef DISPLAY_FACES
-        dlib::rectangle face((long)roi.tl().x, (long)roi.tl().y, (long)roi.br().x - 1, (long)roi.br().y - 1);
+        dlib::rectangle face((long)lastRoi.tl().x, (long)lastRoi.tl().y, (long)lastRoi.br().x - 1, (long)lastRoi.br().y - 1);
         win.add_overlay(face);
   #endif
 #endif
       }
     }
     if (!previouslyDetected) {
-      faceDetector->reset();
       headPoseEstimator->reset();
       ROS_INFO("pose estimation failed");
     }

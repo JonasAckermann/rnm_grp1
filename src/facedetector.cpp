@@ -34,9 +34,9 @@ bool FaceDetector::detectFace(const cv::Mat &image, float scaleLastRoi) {
   if (this->detectionState == INITIAL) {
     std::cout << "detect face in full image" << std::endl << std::flush;
     return this->detectFaceFull(image);
-  } else if (this->detectionState == FOUND_ROUGH_ROI || this->skipCounter == 0) {
-    this->skipCounter = this->skipFrames;
+  } else if (this->detectionState == FOUND_ROUGH_ROI || this->skipCounter <= 0) {
     std::cout << "detect face in scaled roi, skipCounter: " << this->skipCounter << std::endl << std::flush;
+    this->skipCounter = this->skipFrames;
     return this->detectFaceInRegion(image, scaleRect(this->previousRoi, scaleLastRoi, cv::Size(image.rows, image.cols)));
   } else {
     this->skipCounter--;
@@ -104,6 +104,7 @@ bool FaceDetector::detectFaceInRegion(const cv::Mat &image, const cv::Rect &regi
   } else {
     std::cout << "failed to detect in cropped image" << std::endl << std::flush;
     std::cout << "region: " << region.x << ", " << region.y << ", "  << region.width << ", "  << region.height  << std::endl << std::flush;
+    this->detectionState = INITIAL;
     return false;
   }
 }
@@ -128,7 +129,7 @@ bool FaceDetector::detectFaceFull(const cv::Mat &image) {
       this->previousRoi = cv::Rect(cv::Point(roi.x >> 1, roi.y >> 1), cv::Point(roi.br().x >> 1, roi.br().y >> 1));
       std::cout << "detected in full image" << std::endl << std::flush;
       std::cout << "roi: " << this->previousRoi.x << ", " << this->previousRoi.y << ", "  << this->previousRoi.width << ", "  << this->previousRoi.height << ", "  << std::endl << std::flush;
-      this->detectionState = FOUND_ROUGH_ROI;
+      this->detectionState = FOUND_ROI;
     } else {
       std::cout << "Failed to detect enough key points" << std::endl << std::flush;
       this->detectionState = INITIAL;
