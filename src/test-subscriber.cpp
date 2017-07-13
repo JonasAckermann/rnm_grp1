@@ -32,6 +32,8 @@
 
 #include <Eigen/Geometry>
 
+#include <boost/circular_buffer.hpp>
+
 #include <message_filters/subscriber.h>
 #include <message_filters/synchronizer.h>
 #include <message_filters/sync_policies/exact_time.h>
@@ -52,11 +54,13 @@ using namespace std;
 
 #undef DISPLAY_LANDMARKS
 #undef DISPLAY_HEAD_MODEL
-#define DISPLAY_FACES
-#undef DISPLAY_CLOUD
+#undef DISPLAY_FACES
+#define DISPLAY_CLOUD
+
 #define USE_ICP
 #undef COLORED_CLOUD
 
+#define BUFFER_SIZE 4
 #define PARAM_PUB_TOPIC "pubtopic"
 #define DEFAULT_PUB_TOPIC "/headPose/transform"
 
@@ -163,46 +167,88 @@ void readCameraInfo(const sensor_msgs::CameraInfo::ConstPtr cameraInfo, cv::Mat 
     }
 }
 
+const cv::Mat averageDepthImages(boost::circular_buffer<cv::Mat> images, int width, int height) {
+  const int numImages = images.size();
+  cv::Mat averaged = cv::Mat::zeros(width, height, CV_16UC1);
+  for (int r = 0; r < height; r++) {
+    uint16_t *avg = averaged.ptr<uint16_t>(r);
+    for (int idx = 0; idx < images.size(); idx++) {
+      uint16_t *img = images[idx].ptr<uint16_t>(r);
+      for (int c = 0; c < width; c++, avg++, img++) {
+        *avg += *img;
+      }
+    }
+    avg = averaged.ptr<uint16_t>(r);
+    for (int c = 0; c < width; c++, avg++) {
+      *avg /= numImages;
+    }
+  }
+  return averaged;
+}
+
 void imageCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_msgs::Image::ConstPtr imageDepth,
                    const sensor_msgs::CameraInfo::ConstPtr cameraInfoColor, const sensor_msgs::CameraInfo::ConstPtr cameraInfoDepth)
 {
   static bool previouslyDetected = false;
+  static boost::circular_buffer<cv::Mat> depthImageBuffer(BUFFER_SIZE);
   static cv::Rect lastRoi;
   static std::vector<dlib::point> lastKeyPoints;
   try {
     cv::Mat image, depth;
     readImage(imageColor, image);
     readImage(imageDepth, depth);
-    if (previouslyDetected) {
-      previouslyDetected = findPose(image, depth, cameraInfoColor, cameraInfoDepth, lastRoi, lastKeyPoints);
-    } else {
-      // Detect face
-      bool found = faceDetector->detectFace(image);
-      if (found) {
-        lastRoi = faceDetector->getRoi();
-        lastKeyPoints = faceDetector->getKeyPoints();
-        previouslyDetected = findPose(image, depth, cameraInfoColor, cameraInfoDepth, lastRoi, lastKeyPoints);
+    depthImageBuffer.push_back(depth);
+    std::cout << depthImageBuffer.size() << std::endl << std::flush;
+    if (depthImageBuffer.size() == depthImageBuffer.capacity()) {
+      ROS_INFO("before average depth");
+      const cv::Mat averagedDepth = averageDepthImages(depthImageBuffer, depth.cols, depth.rows);
+      ROS_INFO("after average depth");
+      if (previouslyDetected) {
+        previouslyDetected = findPose(image, averagedDepth, cameraInfoColor, cameraInfoDepth, lastRoi, lastKeyPoints);
+      } else {
+        // Detect face
+        bool found = faceDetector->detectFace(image);
+        std::cout << "face detection finished: " << found << std::endl << std::flush;
+        if (found) {
+          lastRoi = faceDetector->getRoi();
+          lastKeyPoints = faceDetector->getKeyPoints();
+          previouslyDetected = findPose(image, averagedDepth, cameraInfoColor, cameraInfoDepth, lastRoi, lastKeyPoints);
+          std::cout << "pose estimation finished: " << previouslyDetected << std::endl << std::flush;
 #if defined(DISPLAY_FACES) || defined(DISPLAY_LANDMARKS)
-        cv_image<bgr_pixel> cimg(image);
-        win.clear_overlay();
-        win.set_image(cimg);
+          cv_image<bgr_pixel> cimg(image);
+          win.clear_overlay();
+          win.set_image(cimg);
   #ifdef DISPLAY_LANDMARKS
-        for(int i = 0; i < numKeyPoints; i++) {
-          for(int pIdx = 0; pIdx < keyPoints.size(); pIdx++) {
-            win.add_overlay(dlib::image_window::overlay_rect(keyPoints.at(pIdx), rgb_pixel(255,0,0), std::to_string(dlibKeyPointIndices[pIdx])));
+          for(int i = 0; i < numKeyPoints; i++) {
+            for(int pIdx = 0; pIdx < keyPoints.size(); pIdx++) {
+              win.add_overlay(dlib::image_window::overlay_rect(keyPoints.at(pIdx), rgb_pixel(255,0,0), std::to_string(dlibKeyPointIndices[pIdx])));
+            }
           }
-        }
   #endif
   #ifdef DISPLAY_FACES
+<<<<<<< Updated upstream
         dlib::rectangle face((long)lastRoi.tl().x, (long)lastRoi.tl().y, (long)lastRoi.br().x - 1, (long)lastRoi.br().y - 1);
         win.add_overlay(face);
+=======
+          dlib::rectangle face((long)roi.tl().x, (long)roi.tl().y, (long)roi.br().x - 1, (long)roi.br().y - 1);
+          win.add_overlay(face);
+>>>>>>> Stashed changes
   #endif
 #endif
+        }
       }
+      if (!previouslyDetected) {
+        faceDetector->reset();
+        headPoseEstimator->reset();
+        ROS_INFO("pose estimation failed");
+      }
+<<<<<<< Updated upstream
     }
     if (!previouslyDetected) {
       headPoseEstimator->reset();
       ROS_INFO("pose estimation failed");
+=======
+>>>>>>> Stashed changes
     }
 #ifdef DISPLAY_CLOUD
     cloudVisualizer->spinOnce(10);
