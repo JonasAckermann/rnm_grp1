@@ -209,4 +209,6 @@ include(../../../dlib-19.4/dlib/cmake)
 # catkin_add_nosetests(test)
 
 add_executable(sub src/test-subscriber.cpp src/facedetector.cpp src/headposeestimator.cpp)
+add_executable(avg src/depthaveraging.cpp)
 target_link_libraries(sub ${OpenCV_LIBRARIES} ${catkin_LIBRARIES} ${PCL_LIBRARIES} dlib::dlib)
+target_link_libraries(avg ${OpenCV_LIBRARIES} ${catkin_LIBRARIES})

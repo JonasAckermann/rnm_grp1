@@ -35,12 +35,12 @@ bool FaceDetector::detectFace(const cv::Mat &image, float scaleLastRoi) {
     std::cout << "detect face in full image" << std::endl << std::flush;
     return this->detectFaceFull(image);
   } else if (this->detectionState == FOUND_ROUGH_ROI || this->skipCounter <= 0) {
-    std::cout << "detect face in scaled roi, skipCounter: " << this->skipCounter << std::endl << std::flush;
+    std::cout << "detect face in scaled roi, skipCounter: " << (unsigned int)this->skipCounter << std::endl << std::flush;
     this->skipCounter = this->skipFrames;
     return this->detectFaceInRegion(image, scaleRect(this->previousRoi, scaleLastRoi, cv::Size(image.rows, image.cols)));
   } else {
     this->skipCounter--;
-    std::cout << "detect landmarks only, skipCounter: " << this->skipCounter << std::endl << std::flush;
+    std::cout << "detect landmarks only, skipCounter: " << (unsigned int)this->skipCounter << std::endl << std::flush;
     return this->detectFaceByLandmarks(image, this->previousRoi);
   }
 }

@@ -32,8 +32,6 @@
 
 #include <Eigen/Geometry>
 
-#include <boost/circular_buffer.hpp>
-
 #include <message_filters/subscriber.h>
 #include <message_filters/synchronizer.h>
 #include <message_filters/sync_policies/exact_time.h>
@@ -52,33 +50,27 @@ using namespace cv;
 using namespace dlib;
 using namespace std;
 
-#undef DISPLAY_LANDMARKS
-#undef DISPLAY_HEAD_MODEL
-#undef DISPLAY_FACES
-#define DISPLAY_CLOUD
-
-#define USE_ICP
-#undef COLORED_CLOUD
-
-#define BUFFER_SIZE 4
-#define PARAM_PUB_TOPIC "pubtopic"
+#define PARAM_PUB_TOPIC "pub_topic"
+#define PARAM_LANDMARKS "landmarks"
+#define PARAM_FACES "faces"
+#define PARAM_CLOUD "cloud"
 #define DEFAULT_PUB_TOPIC "/headPose/transform"
+#define DEFAULT_PARAM_LANDMARKS false
+#define DEFAULT_PARAM_FACES false
+#define DEFAULT_PARAM_CLOUD false
 
 
-#ifdef COLORED_CLOUD
-typedef pcl::PointXYZRGBA CloudPoint;
-#else
 typedef pcl::PointXYZ CloudPoint;
-#endif
-
 typedef message_filters::sync_policies::ExactTime<sensor_msgs::Image, sensor_msgs::Image, sensor_msgs::CameraInfo, sensor_msgs::CameraInfo> ExactSyncPolicy;
 
-#ifdef DISPLAY_CLOUD
 void cloudViewer(pcl::PointCloud<CloudPoint>::Ptr cloud, pcl::PointCloud<CloudPoint>::Ptr cloud2, const cv::Rect roi);
-#endif
 void createCloud(const cv::Mat &depth, const cv::Mat &color, pcl::PointCloud<CloudPoint>::Ptr &cloud, const cv::Rect roi);
 bool findPose(const cv::Mat &color, const cv::Mat &depth, const sensor_msgs::CameraInfo::ConstPtr cameraInfoColor,
               const sensor_msgs::CameraInfo::ConstPtr cameraInfoDepth, const cv::Rect &roi, std::vector<dlib::point> &keyPoints);
+
+bool paramDisplayLandmarks = DEFAULT_PARAM_LANDMARKS;
+bool paramDisplayFaces = DEFAULT_PARAM_FACES;
+bool paramDisplayCloud = DEFAULT_PARAM_CLOUD;
 
 // publisher for head pose transformation
 ros::Publisher transformPub;
@@ -89,8 +81,8 @@ string projectName = "head_pose";
 string headModelFileName = "/home/rnm_grp1/catkin_ws/src/" + projectName + "/data/model_grid_sampled_4mm.pcd";
 string face_cascade_name = "/home/rnm_grp1/catkin_ws/src/" + projectName + "/data/cascades.xml";
 string landmarksFileName = "/home/rnm_grp1/catkin_ws/src/" + projectName + "/data/shape_predictor_68_face_landmarks.dat";
-string topicColor = "/kinect2/qhd/image_color_rect";
-string topicDepth = "/kinect2/qhd/image_depth_rect";
+string topicColor = "/headPose/color/rect";
+string topicDepth = "/headPose/depth/rect";
 
 string window_name = "Capture - Face detection";
 // bounding rectangle of face found in last image
@@ -114,16 +106,10 @@ int dlibKeyPointIndices[numKeyPoints] = {
 // keyPoints in the head model
 Eigen::Matrix<double, 3, Eigen::Dynamic> modelKeyPoints(3, numKeyPoints);
 
-#if defined(DISPLAY_LANDMARKS) || defined(DISPLAY_FACES)
 image_window win;
-#endif
 
 FaceDetector *faceDetector;
 HeadPoseEstimator *headPoseEstimator;
-
-#ifdef DISPLAY_CLOUD
-pcl::visualization::PCLVisualizer::Ptr cloudVisualizer(new pcl::visualization::PCLVisualizer("Cloud Viewer"));
-#endif
 
 cv::Mat cameraMatrixColor = cv::Mat::zeros(3, 3, CV_64F);
 cv::Mat lookupX, lookupY;
@@ -167,75 +153,52 @@ void readCameraInfo(const sensor_msgs::CameraInfo::ConstPtr cameraInfo, cv::Mat 
     }
 }
 
-const cv::Mat averageDepthImages(boost::circular_buffer<cv::Mat> images, int width, int height) {
-  const int numImages = images.size();
-  cv::Mat averaged = cv::Mat::zeros(width, height, CV_16UC1);
-  for (int r = 0; r < height; r++) {
-    uint16_t *avg = averaged.ptr<uint16_t>(r);
-    for (int idx = 0; idx < images.size(); idx++) {
-      uint16_t *img = images[idx].ptr<uint16_t>(r);
-      for (int c = 0; c < width; c++, avg++, img++) {
-        *avg += *img / numImages;
-      }
-    }
-  }
-  return averaged;
-}
-
 void imageCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_msgs::Image::ConstPtr imageDepth,
-                   const sensor_msgs::CameraInfo::ConstPtr cameraInfoColor, const sensor_msgs::CameraInfo::ConstPtr cameraInfoDepth)
-{
+                   const sensor_msgs::CameraInfo::ConstPtr cameraInfoColor, const sensor_msgs::CameraInfo::ConstPtr cameraInfoDepth) {
+  ROS_INFO("received images");
   static bool previouslyDetected = false;
-  static boost::circular_buffer<cv::Mat> depthImageBuffer(BUFFER_SIZE);
   static cv::Rect lastRoi;
   static std::vector<dlib::point> lastKeyPoints;
   try {
     cv::Mat image, depth;
     readImage(imageColor, image);
     readImage(imageDepth, depth);
-    depthImageBuffer.push_back(depth);
-    std::cout << depthImageBuffer.size() << std::endl << std::flush;
-    if (depthImageBuffer.size() == depthImageBuffer.capacity()) {
-      ROS_INFO("before average depth");
-      const cv::Mat averagedDepth = averageDepthImages(depthImageBuffer, depth.cols, depth.rows);
-      ROS_INFO("after average depth");
-      if (previouslyDetected) {
-        previouslyDetected = findPose(image, averagedDepth, cameraInfoColor, cameraInfoDepth, lastRoi, lastKeyPoints);
-      } else {
-        // Detect face
-        bool found = faceDetector->detectFace(image);
-        std::cout << "face detection finished: " << found << std::endl << std::flush;
-        if (found) {
-          lastRoi = faceDetector->getRoi();
-          lastKeyPoints = faceDetector->getKeyPoints();
-          previouslyDetected = findPose(image, averagedDepth, cameraInfoColor, cameraInfoDepth, lastRoi, lastKeyPoints);
-          std::cout << "pose estimation finished: " << previouslyDetected << std::endl << std::flush;
-#if defined(DISPLAY_FACES) || defined(DISPLAY_LANDMARKS)
+    if (previouslyDetected) {
+      previouslyDetected = findPose(image, depth, cameraInfoColor, cameraInfoDepth, lastRoi, lastKeyPoints);
+    } else {
+      // Detect face
+      bool found = faceDetector->detectFace(image);
+      std::cout << "face detection finished: " << found << std::endl << std::flush;
+      if (found) {
+        lastRoi = faceDetector->getRoi();
+        lastKeyPoints = faceDetector->getKeyPoints();
+        previouslyDetected = findPose(image, depth, cameraInfoColor, cameraInfoDepth, lastRoi, lastKeyPoints);
+        std::cout << "pose estimation finished: " << previouslyDetected << std::endl << std::flush;
+        if (paramDisplayFaces || paramDisplayLandmarks) {
           cv_image<bgr_pixel> cimg(image);
           win.clear_overlay();
           win.set_image(cimg);
-  #ifdef DISPLAY_LANDMARKS
-          for(int i = 0; i < numKeyPoints; i++) {
-            for(int pIdx = 0; pIdx < keyPoints.size(); pIdx++) {
-              win.add_overlay(dlib::image_window::overlay_rect(keyPoints.at(pIdx), rgb_pixel(255,0,0), std::to_string(dlibKeyPointIndices[pIdx])));
+          if (paramDisplayLandmarks) {
+            for(int i = 0; i < numKeyPoints; i++) {
+              for(int pIdx = 0; pIdx < lastKeyPoints.size(); pIdx++) {
+                win.add_overlay(dlib::image_window::overlay_rect(lastKeyPoints.at(pIdx), rgb_pixel(255,0,0), std::to_string(dlibKeyPointIndices[pIdx])));
+              }
             }
           }
-  #endif
-  #ifdef DISPLAY_FACES
-        dlib::rectangle face((long)lastRoi.tl().x, (long)lastRoi.tl().y, (long)lastRoi.br().x - 1, (long)lastRoi.br().y - 1);
-        win.add_overlay(face);
-  #endif
-#endif
+          if (paramDisplayFaces) {
+            dlib::rectangle face((long)lastRoi.tl().x, (long)lastRoi.tl().y, (long)lastRoi.br().x - 1, (long)lastRoi.br().y - 1);
+            win.add_overlay(face);
+          }
         }
       }
-      if (!previouslyDetected) {
-        headPoseEstimator->reset();
-        ROS_INFO("pose estimation failed");
-      }
     }
-#ifdef DISPLAY_CLOUD
-    cloudVisualizer->spinOnce(10);
-#endif
+    if (!previouslyDetected) {
+      headPoseEstimator->reset();
+      ROS_INFO("pose estimation failed");
+    }
+    if (paramDisplayCloud) {
+      cloudViewer(NULL, NULL, cv::Rect());
+    }
   } catch (cv_bridge::Exception& e) {
       ROS_ERROR("Could not convert from '%s' to 'bgr8'.", imageColor->encoding.c_str());
   }
@@ -268,9 +231,9 @@ bool findPose(const cv::Mat &color, const cv::Mat &depth, const sensor_msgs::Cam
     if (transformationResult.first)
     {
       Eigen::Matrix4d transformation = transformationResult.second;
-#ifdef DISPLAY_CLOUD
-      cloudViewer(headPoseEstimator->getHeadCloud(), headPoseEstimator->getTransformedModelCloud(), cv::Rect(cv::Point2i(0, 0), cv::Point2i(color.cols, color.rows)));
-#endif
+      if (paramDisplayCloud) {
+        cloudViewer(headPoseEstimator->getHeadCloud(), headPoseEstimator->getTransformedModelCloud(), cv::Rect(cv::Point2i(0, 0), cv::Point2i(color.cols, color.rows)));
+      }
       std_msgs::Float64MultiArray msg;
       msg.data.clear();
       for (int idx = 0; idx < transformation.size(); idx++) {
@@ -284,13 +247,13 @@ bool findPose(const cv::Mat &color, const cv::Mat &depth, const sensor_msgs::Cam
     }
 }
 
-#ifdef DISPLAY_CLOUD
-void cloudViewer(pcl::PointCloud<CloudPoint>::Ptr cloud, pcl::PointCloud<CloudPoint>::Ptr cloud2, const cv::Rect roi)
-{
+void cloudViewer(pcl::PointCloud<CloudPoint>::Ptr cloud, pcl::PointCloud<CloudPoint>::Ptr cloud2, const cv::Rect roi) {
+    static pcl::visualization::PCLVisualizer::Ptr cloudVisualizer = NULL;
     static bool viewerInitialized = false;
     static std::string cloudName = "rendered";
 
     if (!viewerInitialized) {
+        cloudVisualizer = pcl::visualization::PCLVisualizer::Ptr(new pcl::visualization::PCLVisualizer("Cloud Viewer"));
         pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> red(cloud, 255, 0, 0);
         cloudVisualizer->addPointCloud(cloud, red, cloudName);
         cloudVisualizer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 1, cloudName);
@@ -307,6 +270,9 @@ void cloudViewer(pcl::PointCloud<CloudPoint>::Ptr cloud, pcl::PointCloud<CloudPo
         cloudVisualizer->setCameraPosition(0, 0, 0, 0, -1, 0);
         viewerInitialized = true;
     } else {
+      if (cloud == NULL && cloud2 == NULL) {
+        cloudVisualizer->spinOnce(10);
+      } else {
         cloudVisualizer->setSize(roi.width, roi.height);
         pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> red(cloud, 255, 0, 0);
         cloudVisualizer->updatePointCloud(cloud, cloudName);
@@ -314,9 +280,10 @@ void cloudViewer(pcl::PointCloud<CloudPoint>::Ptr cloud, pcl::PointCloud<CloudPo
             pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> green(cloud2, 0, 255, 0);
             cloudVisualizer->updatePointCloud(cloud2, green, "cloud2");
         }
+        cloudVisualizer->spinOnce(10);
+      }
     }
 }
-#endif
 
 
 int main(int argc, char **argv)
@@ -349,34 +316,42 @@ int main(int argc, char **argv)
     // initialize face detector
     faceDetector = new FaceDetector(landmarksFileName, dlibKeyPointIndices, numKeyPoints);
     // initialize head pose estimator
-#ifdef USE_ICP
-    bool useICP = true;
-#else
-    bool useICP = false;
-#endif
-    headPoseEstimator = new HeadPoseEstimator(headModelFileName, modelKeyPoints, useICP, 5.0f, 1000);
-
-#ifdef DISPLAY_HEAD_MODEL
-    pcl::visualization::PCLVisualizer::Ptr headVisualizer(new pcl::visualization::PCLVisualizer("Cloud Viewer"));
-    headVisualizer->addPointCloud(headPoseEstimator->getTransformedModelCloud(), "headCloud");
-#endif
+    headPoseEstimator = new HeadPoseEstimator(headModelFileName, modelKeyPoints, true, 5.0f, 1000);
 
     // initialize ros node
     ros::init(argc, argv, "pose_estimator");
     ros::NodeHandle nh;
+    ros::NodeHandle nhPrivate("~");
 
-    // get console args, TODO - doesn't work
+    // get console args
     std::string pubTopic;
-    if (!nh.getParam(PARAM_PUB_TOPIC, pubTopic)) {
+    if (!nhPrivate.getParam(PARAM_PUB_TOPIC, pubTopic)) {
       pubTopic = DEFAULT_PUB_TOPIC;
     }
+    if (!nhPrivate.getParam(PARAM_LANDMARKS, paramDisplayLandmarks)) {
+      paramDisplayLandmarks = DEFAULT_PARAM_LANDMARKS;
+    }
+    if (!nhPrivate.getParam(PARAM_FACES, paramDisplayFaces)) {
+      paramDisplayFaces = DEFAULT_PARAM_FACES;
+    }
+    if (!nhPrivate.getParam(PARAM_CLOUD, paramDisplayCloud)) {
+      paramDisplayCloud = DEFAULT_PARAM_CLOUD;
+    }
     std::cout << PARAM_PUB_TOPIC << ": " << pubTopic << std::endl << std::flush;
+    std::cout << PARAM_LANDMARKS << ": " << paramDisplayLandmarks << std::endl << std::flush;
+    std::cout << PARAM_FACES << ": " << paramDisplayFaces << std::endl << std::flush;
+    std::cout << PARAM_CLOUD << ": " << paramDisplayCloud << std::endl << std::flush;
 
     image_transport::ImageTransport it(nh);
 
     // taken from kinect2_viewer to create pointcloud
     std::string topicCameraInfoColor = topicColor.substr(0, topicColor.rfind('/')) + "/camera_info";
     std::string topicCameraInfoDepth = topicDepth.substr(0, topicDepth.rfind('/')) + "/camera_info";
+
+    std::cout << topicColor << std::endl << std::flush;
+    std::cout << topicCameraInfoColor << std::endl << std::flush;
+    std::cout << topicDepth << std::endl << std::flush;
+    std::cout << topicCameraInfoDepth << std::endl << std::flush;
 
     image_transport::TransportHints hints(false ? "compressed" : "raw");
     // TODO - consider use of image_transport::CameraSubscriber do combine subscription to cameraImage and cameraInfo (create via image_transport::ImageTransport::subscribeCamera)
@@ -400,8 +375,11 @@ int main(int argc, char **argv)
     delete headPoseEstimator;
 }
 
-#undef DISPLAY_LANDMARKS
-#undef DISPLAY_HEAD_MODEL
-#undef DISPLAY_FACES
-#undef DISPLAY_CLOUD
-#undef COLORED_CLOUD
+#undef PARAM_PUB_TOPIC
+#undef PARAM_LANDMARKS
+#undef PARAM_FACES
+#undef PARAM_CLOUD
+#undef DEFAULT_PUB_TOPIC
+#undef DEFAULT_PARAM_LANDMARKS
+#undef DEFAULT_PARAM_FACES
+#undef DEFAULT_PARAM_CLOUD
