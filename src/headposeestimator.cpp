@@ -12,8 +12,10 @@ HeadPoseEstimator::HeadPoseEstimator(const std::string &headModelFilePath, const
     std::cout << "Failed to load PCD head model file" << std::endl << std::flush;
     throw std::invalid_argument("PCD file for head model not found");
   }
+  this->modelKeyPoints = (Eigen::Matrix3d::Identity() * modelScale) * modelKeyPoints;
   this->expandedModelKeyPoints = Eigen::Matrix4Xd::Ones(4, this->modelKeyPoints.cols());
   this->expandedModelKeyPoints.block(0, 0, 3, this->modelKeyPoints.cols()) = this->modelKeyPoints.block(0, 0, 3, this->modelKeyPoints.cols());
+  //this->lastTransform = Eigen::Matrix4d::Identity(4,4);
   // create pointCloud of head model, only required for stl import
   pcl::RadiusOutlierRemoval<pcl::PointXYZ> outrem;
   outrem.setInputCloud(this->modelPointCloud);
@@ -22,9 +24,15 @@ HeadPoseEstimator::HeadPoseEstimator(const std::string &headModelFilePath, const
   outrem.filter(*this->modelPointCloud);
   pcl::VoxelGrid<pcl::PointXYZ> filter;
   filter.setInputCloud(this->modelPointCloud);
-  const float modelGridSize = this->gridSize / modelScale;
+  const float modelGridSize = this->gridSize / 1000.0;
   filter.setLeafSize(modelGridSize, modelGridSize, modelGridSize);
   filter.filter(*this->modelPointCloud);
+  Eigen::Matrix4d scaleTransform = Eigen::Matrix4Xd::Zero(4, 4);
+  scaleTransform(0, 0) = modelScale;
+  scaleTransform(1, 1) = modelScale;
+  scaleTransform(2, 2) = modelScale;
+  scaleTransform(3, 3) = 1.0;
+  pcl::transformPointCloud(*this->modelPointCloud, *this->modelPointCloud, scaleTransform);
 }
 
 const float HeadPoseEstimator::badPoint = std::numeric_limits<float>::quiet_NaN();
@@ -115,6 +123,10 @@ bool HeadPoseEstimator::validateTransform(const Eigen::Matrix4d &transform) {
     return norm < 4 * 20 * 20 * this->modelKeyPoints.cols();
   } else {
     this->transformedModelKeyPoints = transformedModelKeyPoints;
+    float scaleX = transform.col(0).squaredNorm();
+    float scaleY = transform.col(0).squaredNorm();
+    std::cout << "scaleX: " << scaleX << std::endl << "scaleY: " << scaleY << std::endl << std::flush;
+    // return scaleX >= 0.5 && scaleX <= 1.5 && scaleY >= 0.5 && scaleY <= 1.5;
     return true;
   }
 }
@@ -201,6 +213,7 @@ std::pair<bool, const Eigen::Matrix4d> HeadPoseEstimator::getInitialHeadTransfor
 
     // get transform using umeyama method including scale
     Eigen::Matrix4d transform = Eigen::umeyama(validModelKeyPoints, validCloudKeyPoints, true);
+    std::cout << "umeyama" << std::endl << transform << std::endl << std::flush;
     return std::pair<bool, const Eigen::Matrix4d>(true, transform);
   } else
   {

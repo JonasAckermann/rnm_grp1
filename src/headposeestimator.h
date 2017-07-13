@@ -70,7 +70,7 @@ class HeadPoseEstimator {
     cv::Mat lookUpY;
     bool useICP = true;
     bool lookUpsInitialized = false;
-    const Eigen::Matrix3Xd modelKeyPoints;
+    Eigen::Matrix3Xd modelKeyPoints;
     Eigen::Matrix4Xd expandedModelKeyPoints;
     Eigen::Matrix4Xd transformedModelKeyPoints;
     const pcl::PointCloud<pcl::PointXYZ>::Ptr modelPointCloud;

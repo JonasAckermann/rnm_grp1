@@ -155,7 +155,6 @@ void readCameraInfo(const sensor_msgs::CameraInfo::ConstPtr cameraInfo, cv::Mat 
 
 void imageCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_msgs::Image::ConstPtr imageDepth,
                    const sensor_msgs::CameraInfo::ConstPtr cameraInfoColor, const sensor_msgs::CameraInfo::ConstPtr cameraInfoDepth) {
-  ROS_INFO("received images");
   static bool previouslyDetected = false;
   static cv::Rect lastRoi;
   static std::vector<dlib::point> lastKeyPoints;
@@ -248,14 +247,19 @@ bool findPose(const cv::Mat &color, const cv::Mat &depth, const sensor_msgs::Cam
 }
 
 void cloudViewer(pcl::PointCloud<CloudPoint>::Ptr cloud, pcl::PointCloud<CloudPoint>::Ptr cloud2, const cv::Rect roi) {
-    static pcl::visualization::PCLVisualizer::Ptr cloudVisualizer = NULL;
-    static bool viewerInitialized = false;
-    static std::string cloudName = "rendered";
+  static pcl::visualization::PCLVisualizer::Ptr cloudVisualizer = NULL;
+  static bool viewerInitialized = false;
+  static std::string cloudName = "rendered";
 
+  if (cloud == NULL && cloud2 == NULL) {
+    if (viewerInitialized) {
+      cloudVisualizer->spinOnce(10);
+    }
+  } else {
     if (!viewerInitialized) {
         cloudVisualizer = pcl::visualization::PCLVisualizer::Ptr(new pcl::visualization::PCLVisualizer("Cloud Viewer"));
-        pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> red(cloud, 255, 0, 0);
-        cloudVisualizer->addPointCloud(cloud, red, cloudName);
+        pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> white(cloud, 255, 255, 255);
+        cloudVisualizer->addPointCloud(cloud, white, cloudName);
         cloudVisualizer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 1, cloudName);
         if (cloud2 != NULL) {
             pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> green(cloud2, 0, 255, 0);
@@ -270,19 +274,16 @@ void cloudViewer(pcl::PointCloud<CloudPoint>::Ptr cloud, pcl::PointCloud<CloudPo
         cloudVisualizer->setCameraPosition(0, 0, 0, 0, -1, 0);
         viewerInitialized = true;
     } else {
-      if (cloud == NULL && cloud2 == NULL) {
-        cloudVisualizer->spinOnce(10);
-      } else {
         cloudVisualizer->setSize(roi.width, roi.height);
-        pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> red(cloud, 255, 0, 0);
-        cloudVisualizer->updatePointCloud(cloud, cloudName);
+        pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> white(cloud, 255, 255, 255);
+        cloudVisualizer->updatePointCloud(cloud, white, cloudName);
         if (cloud2 != NULL) {
             pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> green(cloud2, 0, 255, 0);
             cloudVisualizer->updatePointCloud(cloud2, green, "cloud2");
         }
-        cloudVisualizer->spinOnce(10);
-      }
     }
+    cloudVisualizer->spinOnce(10);
+  }
 }
 
 
