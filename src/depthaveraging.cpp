@@ -8,7 +8,7 @@
 #include <message_filters/synchronizer.h>
 #include <message_filters/sync_policies/exact_time.h>
 
-#include <boost/circular_buffer.hpp>
+#include <queue>
 
 #define PARAM_BUFFER_SIZE "buffer_size"
 #define DEFAULT_BUFFER_SIZE 5
@@ -38,9 +38,9 @@ void createImage(const cv::Mat &image, const std_msgs::Header &header, sensor_ms
 /**
  * @brief updateAverageDepthImage Update the average depth image
  * @param newDepthImage New depth image to process
- * @return Average depth image
+ * @return currentAverage
  */
-const cv::Mat updateAverageDepthImage(const cv::Mat &newDepthImage);
+const cv::Mat updateAverageDepthImage(cv::Mat &newDepthImage);
 
 
 int main(int argc, char **argv) {
@@ -84,10 +84,9 @@ int main(int argc, char **argv) {
 
 void imageCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_msgs::Image::ConstPtr imageDepth,
                    const sensor_msgs::CameraInfo::ConstPtr cameraInfoColor, const sensor_msgs::CameraInfo::ConstPtr cameraInfoDepth) {
-  static cv::Mat averageDepth = cv::Mat::zeros(width, height, CV_16UC1);
   cv::Mat depth;
   readImage(imageDepth, depth);
-  updateAverageDepthImage(depth, averageDepth);
+  const cv::Mat averagedDepth = updateAverageDepthImage(depth);
   // create depth image msg
   sensor_msgs::ImagePtr depthMsg = sensor_msgs::ImagePtr(new sensor_msgs::Image);
   std_msgs::Header _header = imageDepth->header;
@@ -120,26 +119,26 @@ void createImage(const cv::Mat &image, const std_msgs::Header &header, sensor_ms
   memcpy(msgImage.data.data(), image.data, size);
 }
 
-const cv::Mat updateAverageDepthImage(const cv::Mat &newDepthImage, cv::Mat &currentAverage) {
+const cv::Mat updateAverageDepthImage(cv::Mat &newDepthImage) {
   static std::queue<cv::Mat> depthImageBuffer;
-  static std::quere<cv::Mat> usedImagesBuffer;
+  static std::queue<cv::Mat> usedImagesBuffer;
+  static cv::Mat currentAverage;
+  if (depthImageBuffer.empty()) {
+    currentAverage = cv::Mat::zeros(newDepthImage.rows, newDepthImage.cols, CV_16UC1);
+  }
   if (depthImageBuffer.size() < bufferSize) {
-
-  } else {
-    const cv::Mat removedImage = depthImageBuffer.pop();
-    cv::Mat removeUsedImages = usedImagesBuffer.pop();
-    const cv::Mat previousUsedImages = usedImagesBuffer.back();
-    for (int r = 0; r < currentAverage.cols; r++) {
+    cv::Mat previousUsedImages;
+    if (depthImageBuffer.empty()) {
+      previousUsedImages = cv::Mat::zeros(currentAverage.cols, currentAverage.rows, CV_8UC1);
+    } else {
+      previousUsedImages = depthImageBuffer.back();
+    }
+    cv::Mat usedImages = previousUsedImages.clone();
+    for (int r = 0; r < currentAverage.rows; r++) {
       uint16_t *avg = currentAverage.ptr<uint16_t>(r);
-      uint8_t *numImgs = usedImages.ptr<uint8_t>(r);
-      uint8_t *prevNumImgs = previousUsedImages.ptr<uint8_t>(r);
       uint16_t *img = newDepthImage.ptr<uint16_t>(r);
-      uint16_t *rImg = removedImage.ptr<uint16_t>(r);
-      for (int c = 0; c < currentAverage.rows; c++, avg++, numImgs++, prevNumImgs++, img++, rImg++) {
-        if (*rImg != 0) {
-          *avg -= (*rImg - *avg) / *numImgs;
-          *numImgs--;
-        }
+      uint8_t *numImgs = usedImages.ptr<uint8_t>(r);
+      for (int c = 0; c < currentAverage.cols; c++) {
         if (*img != 0) {
           *numImgs++;
           *avg += (*img - *avg) / *numImgs;
@@ -147,6 +146,35 @@ const cv::Mat updateAverageDepthImage(const cv::Mat &newDepthImage, cv::Mat &cur
       }
     }
     depthImageBuffer.push(newDepthImage);
-    usedImagesBuffer.push(usedImagesBuffer);
+    usedImagesBuffer.push(usedImages);
+  } else {
+    cv::Mat removedImage = depthImageBuffer.front();
+    // will be updated for added image
+    cv::Mat removedUsedImages = usedImagesBuffer.front();
+    cv::Mat previousUsedImages = usedImagesBuffer.back();
+    for (int r = 0; r < currentAverage.cols; r++) {
+      uint16_t *avg = currentAverage.ptr<uint16_t>(r);
+      uint16_t *img = newDepthImage.ptr<uint16_t>(r);
+      uint16_t *rImg = removedImage.ptr<uint16_t>(r);
+      uint8_t *numImgs = removedUsedImages.ptr<uint8_t>(r);
+      uint8_t *prevNumImgs = previousUsedImages.ptr<uint8_t>(r);
+      for (int c = 0; c < currentAverage.rows; c++, avg++, numImgs++, prevNumImgs++, img++, rImg++) {
+        if (*rImg != 0) {
+          *avg -= (*rImg - *avg) / *numImgs;
+          *numImgs = *prevNumImgs - 1;
+        } else {
+          *numImgs = *prevNumImgs;
+        }
+        if (*img != 0) {
+          *numImgs++;
+          *avg += (*img - *avg) / *numImgs;
+        }
+      }
+    }
+    depthImageBuffer.pop();
+    usedImagesBuffer.pop();
+    depthImageBuffer.push(newDepthImage);
+    usedImagesBuffer.push(removedUsedImages);
   }
+  return currentAverage;
 }
