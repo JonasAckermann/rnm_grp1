@@ -175,12 +175,8 @@ const cv::Mat averageDepthImages(boost::circular_buffer<cv::Mat> images, int wid
     for (int idx = 0; idx < images.size(); idx++) {
       uint16_t *img = images[idx].ptr<uint16_t>(r);
       for (int c = 0; c < width; c++, avg++, img++) {
-        *avg += *img;
+        *avg += *img / numImages;
       }
-    }
-    avg = averaged.ptr<uint16_t>(r);
-    for (int c = 0; c < width; c++, avg++) {
-      *avg /= numImages;
     }
   }
   return averaged;
@@ -226,29 +222,16 @@ void imageCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_m
           }
   #endif
   #ifdef DISPLAY_FACES
-<<<<<<< Updated upstream
         dlib::rectangle face((long)lastRoi.tl().x, (long)lastRoi.tl().y, (long)lastRoi.br().x - 1, (long)lastRoi.br().y - 1);
         win.add_overlay(face);
-=======
-          dlib::rectangle face((long)roi.tl().x, (long)roi.tl().y, (long)roi.br().x - 1, (long)roi.br().y - 1);
-          win.add_overlay(face);
->>>>>>> Stashed changes
   #endif
 #endif
         }
       }
       if (!previouslyDetected) {
-        faceDetector->reset();
         headPoseEstimator->reset();
         ROS_INFO("pose estimation failed");
       }
-<<<<<<< Updated upstream
-    }
-    if (!previouslyDetected) {
-      headPoseEstimator->reset();
-      ROS_INFO("pose estimation failed");
-=======
->>>>>>> Stashed changes
     }
 #ifdef DISPLAY_CLOUD
     cloudVisualizer->spinOnce(10);
