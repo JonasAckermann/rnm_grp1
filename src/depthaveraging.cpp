@@ -127,6 +127,7 @@ const cv::Mat updateAverageDepthImage(cv::Mat &newDepthImage) {
     currentAverage = cv::Mat::zeros(newDepthImage.rows, newDepthImage.cols, CV_16UC1);
   }
   if (depthImageBuffer.size() < bufferSize) {
+    ROS_INFO("< bufferSize, %d, %d", depthImageBuffer.size(), bufferSize);
     cv::Mat previousUsedImages;
     if (depthImageBuffer.empty()) {
       previousUsedImages = cv::Mat::zeros(currentAverage.cols, currentAverage.rows, CV_8UC1);
@@ -138,9 +139,9 @@ const cv::Mat updateAverageDepthImage(cv::Mat &newDepthImage) {
       uint16_t *avg = currentAverage.ptr<uint16_t>(r);
       uint16_t *img = newDepthImage.ptr<uint16_t>(r);
       uint8_t *numImgs = usedImages.ptr<uint8_t>(r);
-      for (int c = 0; c < currentAverage.cols; c++) {
+      for (int c = 0; c < currentAverage.cols; c++, avg++, img++, numImgs++) {
         if (*img != 0) {
-          *numImgs++;
+          *numImgs += 1;
           *avg += (*img - *avg) / *numImgs;
         }
       }
@@ -148,6 +149,7 @@ const cv::Mat updateAverageDepthImage(cv::Mat &newDepthImage) {
     depthImageBuffer.push(newDepthImage);
     usedImagesBuffer.push(usedImages);
   } else {
+    ROS_INFO("= bufferSize");
     cv::Mat removedImage = depthImageBuffer.front();
     // will be updated for added image
     cv::Mat removedUsedImages = usedImagesBuffer.front();
@@ -166,7 +168,7 @@ const cv::Mat updateAverageDepthImage(cv::Mat &newDepthImage) {
           *numImgs = *prevNumImgs;
         }
         if (*img != 0) {
-          *numImgs++;
+          *numImgs += 1;
           *avg += (*img - *avg) / *numImgs;
         }
       }
