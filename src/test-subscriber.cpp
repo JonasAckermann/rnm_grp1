@@ -162,9 +162,6 @@ void imageCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_m
     cv::Mat image, depth;
     readImage(imageColor, image);
     readImage(imageDepth, depth);
-    if (previouslyDetected) {
-      previouslyDetected = findPose(image, depth, cameraInfoColor, cameraInfoDepth, lastRoi, lastKeyPoints);
-    } else {
       // Detect face
       bool found = faceDetector->detectFace(image);
       std::cout << "face detection finished: " << found << std::endl << std::flush;
@@ -190,7 +187,6 @@ void imageCallback(const sensor_msgs::Image::ConstPtr imageColor, const sensor_m
           }
         }
       }
-    }
     if (!previouslyDetected) {
       headPoseEstimator->reset();
       ROS_INFO("pose estimation failed");

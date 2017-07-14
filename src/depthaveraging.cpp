@@ -120,7 +120,7 @@ void createImage(const cv::Mat &image, const std_msgs::Header &header, sensor_ms
 
 const cv::Mat averageDepthImages(boost::circular_buffer<cv::Mat> &images, int width, int height) {
   const int numImages = images.size();
-  cv::Mat averaged = cv::Mat::zeros(width, height, CV_16UC1);
+  cv::Mat averaged = cv::Mat::zeros(height, width, CV_16UC1);
   for (int r = 0; r < height; r++) {
     uint16_t *avg = averaged.ptr<uint16_t>(r);
     for (int c = 0; c < width; c++, avg++) {
